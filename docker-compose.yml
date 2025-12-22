@@ -3,6 +3,8 @@ services:
     build: .
     depends_on:
       - api
+    environment:
+      TZ: America/Los_Angeles
     ports:
       - "8082:80"
   db:

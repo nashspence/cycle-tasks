@@ -4,45 +4,47 @@ import {run} from '@cycle/run';
 import {withState} from '@cycle/state';
 import {
   makeDOMDriver, h, div, h1, a, form, label, input, textarea,
-  button, select, option, ul, li, span
+  button, select, option, span
 } from '@cycle/dom';
 import {makeHTTPDriver} from '@cycle/http';
 import {makeHistoryDriver} from '@cycle/history';
-
-/**
- * Strict conventional Cycle.js:
- * Intent: DOM+History -> actions
- * Model: sources+actions -> reducers + HTTP + History
- * View: state$ -> VDOM
- */
 
 const API = `${location.origin}/api`;
 const J = {'Content-Type': 'application/json', 'Prefer': 'return=representation'};
 const MAXPOS = 2147483647;
 
+const DEFAULT_COLS = ['done','title','due','tags'];
+
 const num = v => (v == null || v === '' || v === 'null') ? null : Number(v);
 const int = (v, d) => {
-  if (v == null || v === '') return d; // IMPORTANT: missing query param defaults
+  if (v == null || v === '') return d;
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
 };
 const qnorm = s => (s || '').toLowerCase().trim();
 const tagsFrom = s => qnorm(s).split(/[,\s]+/).filter(Boolean);
 
+const parseCols = s => {
+  const raw = (s == null || s === '') ? null : String(s);
+  const cols = raw ? raw.split(',').map(qnorm).filter(Boolean) : DEFAULT_COLS.slice();
+  return {cols, raw: raw || ''};
+};
+
 const parseRoute = search => {
   const qs = new URLSearchParams(search || '');
-  const page = qs.get('page') || 'home';               // home | task | new | edit | move
+  const page = qs.get('page') || 'home';
   const id = num(qs.get('id'));
-  const parent = num(qs.get('parent'));                // for page=new
+  const parent = num(qs.get('parent'));
   const q = qs.get('q') || '';
   const tags = qs.get('tags') || '';
   const showDone = (qs.get('done') || '0') === '1';
-  const sort = qs.get('sort') || 'position';           // position | due | created | title
+  const sort = qs.get('sort') || 'position';
   const dir = (qs.get('dir') || 'asc') === 'desc' ? 'desc' : 'asc';
   const reorder = (qs.get('reorder') || '0') === '1';
-  const limit = Math.max(1, Math.min(200, int(qs.get('limit'), 25))); // default 25
-  const p = Math.max(1, int(qs.get('p'), 1));           // 1-based page index
-  return {page, id, parent, q, tags, showDone, sort, dir, reorder, limit, p, _qs: qs};
+  const limit = Math.max(1, Math.min(200, int(qs.get('limit'), 25)));
+  const p = Math.max(1, int(qs.get('p'), 1));
+  const {cols, raw: colsRaw} = parseCols(qs.get('cols'));
+  return {page, id, parent, q, tags, showDone, sort, dir, reorder, limit, p, cols, colsRaw, _qs: qs};
 };
 
 const href = (r, patch = {}) => {
@@ -83,12 +85,12 @@ function intent(sources) {
     ev('select.dir', 'change').map(e => ({dir: e.target.value, p: '1'})),
     ev('input.reorder', 'change').map(e => ({reorder: e.target.checked ? '1' : '0'})),
     ev('select.limit', 'change').map(e => ({limit: e.target.value, p: '1'})),
+    ev('input.col', 'change').map(e => ({cols: e.target.dataset.cols, p: '1'})),
   );
 
   const toggleDone$ = ev('.toggle', 'change')
     .map(e => ({id: Number(e.target.dataset.id), done: e.target.checked}));
 
-  // Cross-page reorder by absolute position (uses rpc/move_task)
   const moveUp$ = ev('button.up', 'click', {preventDefault: true})
     .map(e => ({
       task_id: Number(e.currentTarget.dataset.id),
@@ -101,7 +103,7 @@ function intent(sources) {
     .map(e => ({
       task_id: Number(e.currentTarget.dataset.id),
       new_parent_id: num(e.currentTarget.dataset.parent),
-      new_position: (Number(e.currentTarget.dataset.pos) | 0) + 2   // <-- FIX (was +1)
+      new_position: (Number(e.currentTarget.dataset.pos) | 0) + 2
     }))
     .filter(x => x.task_id != null);
 
@@ -186,7 +188,7 @@ function model(sources, actions) {
     const qs = new URLSearchParams();
     qs.set('select', sel);
     qs.set('order', orderFor(r));
-    qs.set('limit', String(r.limit + 1)); // +1 sentinel to detect "has more"
+    qs.set('limit', String(r.limit + 1));
     qs.set('offset', String((r.p - 1) * r.limit));
     if (parentId == null) qs.set('parent_id', 'is.null');
     else qs.set('parent_id', `eq.${parentId}`);
@@ -212,7 +214,6 @@ function model(sources, actions) {
     return [];
   };
 
-  // ---- reducers ----
   const initReducer$ = xs.of(prev => (prev === undefined ? initialState : prev));
   const routeReducer$ = route$.map(r => setKey('route', r));
 
@@ -264,13 +265,11 @@ function model(sources, actions) {
     formInputReducer$, moveParentReducer$
   );
 
-  // ---- History ----
   const history$ = xs.merge(
     actions.nav$.map(url => loc(url, 'push')),
     actions.routePatch$.compose(sampleCombine(route$)).map(([patch, r]) => loc(href(r, patch), 'replace')),
   );
 
-  // ---- HTTP ----
   const loadReq$ = route$.map(reqsForRoute).map(xs.fromArray).flatten();
 
   const toggleDoneReq$ = actions.toggleDone$
@@ -346,7 +345,6 @@ function model(sources, actions) {
     submitReq$, deleteReq$
   );
 
-  // ---- post-mutation navigation ----
   const backLocFor = (r, parent_id) =>
     parent_id == null
       ? loc(href(r, {page:'home', id:null, parent:null}), 'push')
@@ -387,24 +385,63 @@ const selVal = v => ({
   }
 });
 
+const colSet = r => new Set((r && r.cols && r.cols.length) ? r.cols : DEFAULT_COLS);
+const toggleCols = (r, c) => {
+  const cols = (r.cols && r.cols.length ? r.cols : DEFAULT_COLS).slice();
+  const i = cols.indexOf(c);
+  const next = i >= 0 ? cols.filter(x => x !== c) : cols.concat([c]);
+  return next.join(',');
+};
+
+// local-time, readable, minimal (built-in Intl)
+const DF = new Intl.DateTimeFormat(undefined, {dateStyle:'medium'});
+const DTF = new Intl.DateTimeFormat(undefined, {dateStyle:'medium', timeStyle:'short'});
+const dueFmt = s => {
+  if (!s) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s));
+  const d = m ? new Date(+m[1], +m[2]-1, +m[3]) : new Date(s);
+  return isNaN(d) ? String(s) : DF.format(d);
+};
+const createdFmt = s => {
+  if (!s) return '';
+  const d = new Date(s);
+  return isNaN(d) ? String(s) : DTF.format(d);
+};
+
 function TaskRow(r, t) {
   const toTask = href(r, {page:'task', id: t.id});
   const pid = t.parent_id == null ? 'null' : String(t.parent_id);
   const showArrows = !!r.reorder && r.sort === 'position';
+  const on = colSet(r);
 
-  return li('.task', {key: t.id, attrs:{'data-id': t.id, 'data-parent': pid}}, [
-    div('.row', {attrs:{draggable:true, 'data-id': t.id, 'data-parent': pid}}, [
-      showArrows ? button('.up', {attrs:{type:'button', 'data-id': t.id, 'data-pos': String(t.position|0), 'data-parent': pid}}, '↑') : null,
-      showArrows ? button('.down', {attrs:{type:'button', 'data-id': t.id, 'data-pos': String(t.position|0), 'data-parent': pid}}, '↓') : null,
-      showArrows ? span(' ') : null,
-      input('.toggle', {attrs:{type:'checkbox', 'data-id': t.id}, props:{checked: !!t.done}}),
-      span(' '),
-      a('.nav', {attrs:{href: toTask}}, [t.title || '(untitled)']),
-    ]),
+  const cellTitle = h('td', [
+    showArrows ? button('.up', {attrs:{type:'button', 'data-id': t.id, 'data-pos': String(t.position|0), 'data-parent': pid}}, '↑') : null,
+    showArrows ? button('.down', {attrs:{type:'button', 'data-id': t.id, 'data-pos': String(t.position|0), 'data-parent': pid}}, '↓') : null,
+    showArrows ? span(' ') : null,
+    a('.nav', {attrs:{href: toTask}}, [t.title || '(untitled)']),
   ]);
+
+  return h('tr.row', {key: t.id, attrs:{draggable:true, 'data-id': t.id, 'data-parent': pid}}, [
+    on.has('done') ? h('td', [input('.toggle', {attrs:{type:'checkbox', 'data-id': t.id}, props:{checked: !!t.done}})]) : null,
+    on.has('position') ? h('td', [String(t.position == null ? '' : t.position)]) : null, // Pos BEFORE Title
+    on.has('title') ? cellTitle : null,
+    on.has('due') ? h('td', [dueFmt(t.due_date)]) : null,
+    on.has('tags') ? h('td', [(t.tags || []).join(' ')]) : null,
+    on.has('created') ? h('td', [createdFmt(t.created_at)]) : null,
+  ].filter(Boolean));
 }
 
 function Filters(r) {
+  const on = colSet(r);
+  const colBox = (c, labelText) =>
+    label([
+      input('.col', {
+        attrs:{type:'checkbox', 'data-cols': toggleCols(r, c)},
+        props:{checked: on.has(c)}
+      }),
+      ` ${labelText}`
+    ]);
+
   return div('.filters', [
     div([label(['Search ', input('.q', {attrs:{placeholder:'title/description', value: r.q}})])]),
     div([label(['Tags ', input('.tags', {attrs:{placeholder:'tag1 tag2', value: r.tags}})])]),
@@ -426,6 +463,10 @@ function Filters(r) {
       option({attrs:{value:'asc'}}, 'asc'),
       option({attrs:{value:'desc'}}, 'desc'),
     ])])]),
+    div([span('Columns: '), colBox('done','done'), span(' '), colBox('position','pos'), span(' '),
+      colBox('title','title'), span(' '), colBox('due','due'), span(' '),
+      colBox('tags','tags'), span(' '), colBox('created','created')
+    ]),
   ]);
 }
 
@@ -453,6 +494,7 @@ function view(state$) {
     const newChild = r.id != null ? href(r, {page:'new', parent:r.id}) : newRoot;
     const editLink = t => href(r, {page:'edit', id: t.id});
     const items = s.list || [];
+    const on = colSet(r);
 
     const header = () => {
       if (r.page === 'home') return null;
@@ -467,8 +509,8 @@ function view(state$) {
           : href(r, {page:'task', id: upId});
 
         const upLabel = upId == null ? '← Back to Tasks' : '← Up one level';
-        const due = t && t.due_date ? `due ${t.due_date}` : 'no due';
-        const created = t && t.created_at ? `created ${t.created_at}` : null;
+        const due = t && t.due_date ? `due ${dueFmt(t.due_date)}` : 'no due';
+        const created = t && t.created_at ? `created ${createdFmt(t.created_at)}` : null;
         const tagStr = t && t.tags && t.tags.length ? `tags: ${t.tags.join(', ')}` : 'no tags';
 
         return div('.header', [
@@ -522,10 +564,24 @@ function view(state$) {
       return null;
     };
 
+    const tableHead = () => h('thead', [
+      h('tr', [
+        on.has('done') ? h('th', ['Done']) : null,
+        on.has('position') ? h('th', ['Pos']) : null, // Pos BEFORE Title
+        on.has('title') ? h('th', ['Title']) : null,
+        on.has('due') ? h('th', ['Due']) : null,
+        on.has('tags') ? h('th', ['Tags']) : null,
+        on.has('created') ? h('th', ['Created']) : null,
+      ].filter(Boolean))
+    ]);
+
     const listPage = () => div('.page', [
       header(),
       ListControls(r, r.page === 'home' ? newRoot : newChild),
-      ul('.list', items.map(t => TaskRow(r, t))),
+      h('table', [
+        tableHead(),
+        h('tbody', items.map(t => TaskRow(r, t))),
+      ]),
       items.length === 0 ? div('.empty', ['No tasks match filters.']) : null,
       Pager(r, !!s.hasMore),
     ]);
