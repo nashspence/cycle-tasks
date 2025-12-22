@@ -32,9 +32,10 @@ const parseCols = s => {
 
 const parseRoute = search => {
   const qs = new URLSearchParams(search || '');
-  const page = qs.get('page') || 'home';
+  const page = qs.get('page') || 'home';               // home | task | new | edit | move | alerts | alert
   const id = num(qs.get('id'));
   const parent = num(qs.get('parent'));
+  const atag = (qs.get('atag') || '').trim();          // alert tag detail
   const q = qs.get('q') || '';
   const tags = qs.get('tags') || '';
   const showDone = (qs.get('done') || '0') === '1';
@@ -44,7 +45,7 @@ const parseRoute = search => {
   const limit = Math.max(1, Math.min(200, int(qs.get('limit'), 25)));
   const p = Math.max(1, int(qs.get('p'), 1));
   const {cols, raw: colsRaw} = parseCols(qs.get('cols'));
-  return {page, id, parent, q, tags, showDone, sort, dir, reorder, limit, p, cols, colsRaw, _qs: qs};
+  return {page, id, parent, atag, q, tags, showDone, sort, dir, reorder, limit, p, cols, colsRaw, _qs: qs};
 };
 
 const href = (r, patch = {}) => {
@@ -66,9 +67,28 @@ const initialState = {
   hasMore: false,
   form: {title:'', description:'', tags:'', due_date:''},
   moveParent: '',
+  alerts: [],          // raw rows {tag,url,enabled,created_at}
+  alertUrls: [],       // rows for one tag
+  anew: {tag:'', url:''},
+  aaddUrl: '',
 };
 
 const base = s => (s === undefined ? initialState : s);
+
+// local-time, readable, minimal
+const DF = new Intl.DateTimeFormat(undefined, {dateStyle:'medium'});
+const DTF = new Intl.DateTimeFormat(undefined, {dateStyle:'medium', timeStyle:'short'});
+const dueFmt = s => {
+  if (!s) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s));
+  const d = m ? new Date(+m[1], +m[2]-1, +m[3]) : new Date(s);
+  return isNaN(d) ? String(s) : DF.format(d);
+};
+const createdFmt = s => {
+  if (!s) return '';
+  const d = new Date(s);
+  return isNaN(d) ? String(s) : DTF.format(d);
+};
 
 function intent(sources) {
   const DOM = sources.DOM;
@@ -152,23 +172,33 @@ function intent(sources) {
   const del$ = ev('button.delete', 'click', {preventDefault: true}).mapTo(true);
   const moveParent$ = ev('input.mparent', 'input').map(e => e.target.value);
 
+  // alerts
+  const anewReducer$ = xs.merge(
+    formInput('input.anew-tag', 'tag'),
+    formInput('input.anew-url', 'url'),
+  );
+  const aaddUrl$ = ev('input.aadd-url', 'input').map(e => e.target.value);
+  const acreate$ = xs.merge(
+    ev('form.anew', 'submit', {preventDefault: true}).mapTo('new'),
+    ev('form.aadd', 'submit', {preventDefault: true}).mapTo('add'),
+  );
+  const atoggle$ = ev('.atoggle', 'change')
+    .map(e => ({tag: e.target.dataset.tag, url: e.target.dataset.url, enabled: e.target.checked}));
+  const adel$ = ev('button.adel', 'click', {preventDefault: true})
+    .map(e => ({tag: e.currentTarget.dataset.tag, url: e.currentTarget.dataset.url}));
+  const adelTag$ = ev('button.adelTag', 'click', {preventDefault: true})
+    .map(e => ({tag: e.currentTarget.dataset.tag}));
+
   return {
     nav$, routePatch$, toggleDone$, moveUp$, moveDown$,
     dragstart$, dragover$, dropInto$, dropUp$,
     formReducer$, submitKind$, del$, moveParent$,
+    anewReducer$, aaddUrl$, acreate$, atoggle$, adel$, adelTag$,
   };
 }
 
 function model(sources, actions) {
   const sel = 'id,title,description,tags,due_date,done,created_at,parent_id,position';
-
-  const route$ = sources.History
-    .startWith({search: location.search})
-    .map(l => parseRoute(l.search))
-    .remember();
-
-  const state$ = sources.state.stream.remember();
-
   const asArray = body => Array.isArray(body) ? body : [];
   const asOne = body => Array.isArray(body) ? (body[0] || null) : null;
 
@@ -177,6 +207,13 @@ function model(sources, actions) {
 
   const setKey = (k, v) => prev => ({...base(prev), [k]: v});
   const patchState = patch => prev => ({...base(prev), ...patch});
+
+  const route$ = sources.History
+    .startWith({search: location.search})
+    .map(l => parseRoute(l.search))
+    .remember();
+
+  const state$ = sources.state.stream.remember();
 
   const orderFor = r => {
     const col = {position:'position', due:'due_date', created:'created_at', title:'title'}[r.sort] || 'position';
@@ -200,6 +237,12 @@ function model(sources, actions) {
     return `${API}/tasks?${qs.toString()}`;
   };
 
+  const alertsSel = 'tag,url,enabled,created_at';
+  const alertsAllUrl = () =>
+    `${API}/apprise_targets?select=${alertsSel}&order=tag.asc,url.asc&limit=1000`;
+  const alertsTagUrl = tag =>
+    `${API}/apprise_targets?select=${alertsSel}&tag=eq.${encodeURIComponent(tag)}&order=url.asc`;
+
   const reqsForRoute = r => {
     if (r.page === 'home') return [{url: listUrl(r, null), method:'GET', category:'list'}];
     if (r.page === 'task' && r.id != null) {
@@ -211,9 +254,12 @@ function model(sources, actions) {
     if ((r.page === 'edit' || r.page === 'move') && r.id != null) {
       return [{url: `${API}/tasks?select=${sel}&id=eq.${r.id}`, method:'GET', category:'task'}];
     }
+    if (r.page === 'alerts') return [{url: alertsAllUrl(), method:'GET', category:'alerts'}];
+    if (r.page === 'alert' && r.atag) return [{url: alertsTagUrl(r.atag), method:'GET', category:'aurls'}];
     return [];
   };
 
+  // ---- reducers ----
   const initReducer$ = xs.of(prev => (prev === undefined ? initialState : prev));
   const routeReducer$ = route$.map(r => setKey('route', r));
 
@@ -229,11 +275,16 @@ function model(sources, actions) {
   const taskReducer$ = selectBody('task', asOne).map(task => setKey('task', task));
   const taskFromHTTP$ = selectBody('task', asOne).remember();
 
+  const alertsReducer$ = selectBody('alerts', asArray).map(rows => setKey('alerts', rows));
+  const aurlsReducer$ = selectBody('aurls', asArray).map(rows => setKey('alertUrls', rows));
+
   const formInitReducer$ = route$.map(r => prev => {
     const s = base(prev);
     if (r.page === 'new') return {...s, form:{title:'', description:'', tags:'', due_date:''}, moveParent:'', task:null};
     if (r.page === 'edit') return {...s, moveParent:''};
     if (r.page === 'move') return s;
+    if (r.page === 'alerts') return {...s, anew:{tag:'', url:''}, aaddUrl:'', alertUrls:[]};
+    if (r.page === 'alert') return {...s, aaddUrl:''};
     return {...s, moveParent:''};
   });
 
@@ -257,19 +308,29 @@ function model(sources, actions) {
     return {...s, form: reducer(s.form)};
   });
 
+  const anewInputReducer$ = actions.anewReducer$.map(reducer => prev => {
+    const s = base(prev);
+    return {...s, anew: reducer(s.anew)};
+  });
+
+  const aaddUrlReducer$ = actions.aaddUrl$.map(v => setKey('aaddUrl', v));
   const moveParentReducer$ = actions.moveParent$.map(v => setKey('moveParent', v));
 
   const reducer$ = xs.merge(
     initReducer$, routeReducer$, listReducer$, taskReducer$,
+    alertsReducer$, aurlsReducer$,
     formInitReducer$, formFromTaskReducer$, moveFromTaskReducer$,
-    formInputReducer$, moveParentReducer$
+    formInputReducer$, moveParentReducer$,
+    anewInputReducer$, aaddUrlReducer$,
   );
 
+  // ---- History ----
   const history$ = xs.merge(
     actions.nav$.map(url => loc(url, 'push')),
     actions.routePatch$.compose(sampleCombine(route$)).map(([patch, r]) => loc(href(r, patch), 'replace')),
   );
 
+  // ---- HTTP ----
   const loadReq$ = route$.map(reqsForRoute).map(xs.fromArray).flatten();
 
   const toggleDoneReq$ = actions.toggleDone$
@@ -326,11 +387,44 @@ function model(sources, actions) {
       category:'delete'
     }));
 
+  // alerts CRUD
+  const acreateReq$ = actions.acreate$
+    .compose(sampleCombine(route$, state$))
+    .map(([kind, r, s]) => {
+      const tag = kind === 'new' ? String(s.anew.tag || '').trim() : String(r.atag || '').trim();
+      const url = kind === 'new' ? String(s.anew.url || '').trim() : String(s.aaddUrl || '').trim();
+      return (tag && url)
+        ? ({url: `${API}/apprise_targets`, method:'POST', headers:J, send:{tag, url, enabled:true}, category:'acreate'})
+        : null;
+    })
+    .filter(Boolean);
+
+  const atoggleReq$ = actions.atoggle$
+    .map(({tag, url, enabled}) => ({
+      url: `${API}/apprise_targets?tag=eq.${encodeURIComponent(tag)}&url=eq.${encodeURIComponent(url)}`,
+      method:'PATCH', headers:J, send:{enabled}, category:'amut'
+    }));
+
+  const adelReq$ = actions.adel$
+    .map(({tag, url}) => ({
+      url: `${API}/apprise_targets?tag=eq.${encodeURIComponent(tag)}&url=eq.${encodeURIComponent(url)}`,
+      method:'DELETE', headers:{'Prefer':'return=representation'}, category:'amut'
+    }));
+
+  const adelTagReq$ = actions.adelTag$
+    .map(({tag}) => ({
+      url: `${API}/apprise_targets?tag=eq.${encodeURIComponent(tag)}`,
+      method:'DELETE', headers:{'Prefer':'return=representation'}, category:'adelTag'
+    }));
+
   const reloadTrigger$ = xs.merge(
     sources.HTTP.select('mut').flatten().mapTo(true),
     sources.HTTP.select('create').flatten().mapTo(true),
     sources.HTTP.select('update').flatten().mapTo(true),
     sources.HTTP.select('delete').flatten().mapTo(true),
+    sources.HTTP.select('acreate').flatten().mapTo(true),
+    sources.HTTP.select('amut').flatten().mapTo(true),
+    sources.HTTP.select('adelTag').flatten().mapTo(true),
   );
 
   const reloadReq$ = reloadTrigger$
@@ -342,9 +436,11 @@ function model(sources, actions) {
   const http$ = xs.merge(
     loadReq$, reloadReq$,
     toggleDoneReq$, reorderReq$, dndParentReq$,
-    submitReq$, deleteReq$
+    submitReq$, deleteReq$,
+    acreateReq$, atoggleReq$, adelReq$, adelTagReq$
   );
 
+  // ---- post-mutation navigation (tasks + delete-tag) ----
   const backLocFor = (r, parent_id) =>
     parent_id == null
       ? loc(href(r, {page:'home', id:null, parent:null}), 'push')
@@ -372,7 +468,11 @@ function model(sources, actions) {
       return backLocFor(r, s.task ? s.task.parent_id : null);
     });
 
-  return {state: reducer$, HTTP: http$, History: xs.merge(history$, postNav$)};
+  const delTagNav$ = sources.HTTP.select('adelTag').flatten()
+    .compose(sampleCombine(route$))
+    .map(([_, r]) => loc(href(r, {page:'alerts', atag:null, id:null, parent:null}), 'push'));
+
+  return {state: reducer$, HTTP: http$, History: xs.merge(history$, postNav$, delTagNav$)};
 }
 
 // ---- View helpers ----
@@ -393,20 +493,11 @@ const toggleCols = (r, c) => {
   return next.join(',');
 };
 
-// local-time, readable, minimal (built-in Intl)
-const DF = new Intl.DateTimeFormat(undefined, {dateStyle:'medium'});
-const DTF = new Intl.DateTimeFormat(undefined, {dateStyle:'medium', timeStyle:'short'});
-const dueFmt = s => {
-  if (!s) return '';
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s));
-  const d = m ? new Date(+m[1], +m[2]-1, +m[3]) : new Date(s);
-  return isNaN(d) ? String(s) : DF.format(d);
-};
-const createdFmt = s => {
-  if (!s) return '';
-  const d = new Date(s);
-  return isNaN(d) ? String(s) : DTF.format(d);
-};
+const TopNav = r => div([
+  a('.nav', {attrs:{href: href(r, {page:'home', id:null, parent:null, atag:null})}}, 'Tasks'),
+  span(' | '),
+  a('.nav', {attrs:{href: href(r, {page:'alerts', id:null, parent:null, atag:null})}}, 'Alerts'),
+]);
 
 function TaskRow(r, t) {
   const toTask = href(r, {page:'task', id: t.id});
@@ -435,10 +526,7 @@ function Filters(r) {
   const on = colSet(r);
   const colBox = (c, labelText) =>
     label([
-      input('.col', {
-        attrs:{type:'checkbox', 'data-cols': toggleCols(r, c)},
-        props:{checked: on.has(c)}
-      }),
+      input('.col', {attrs:{type:'checkbox', 'data-cols': toggleCols(r, c)}, props:{checked: on.has(c)}}),
       ` ${labelText}`
     ]);
 
@@ -524,9 +612,7 @@ function view(state$) {
             created ? div([created]) : null,
             div([tagStr]),
           ]) : null,
-          div('.actions', [
-            t ? a('.nav', {attrs:{href:editLink(t), draggable:'false'}}, 'Edit') : null,
-          ]),
+          div('.actions', [t ? a('.nav', {attrs:{href:editLink(t), draggable:'false'}}, 'Edit') : null]),
         ]);
       }
 
@@ -552,14 +638,19 @@ function view(state$) {
 
       if (r.page === 'move') {
         const pid = s.task ? s.task.parent_id : null;
-        const back = pid == null
-          ? href(r, {page:'home', id:null, parent:null})
-          : href(r, {page:'task', id: pid});
+        const back = pid == null ? href(r, {page:'home', id:null, parent:null}) : href(r, {page:'task', id: pid});
         return div('.header', [
           div([a('.nav', {attrs:{href:back, draggable:'false'}}, '← Back')]),
           h1(s.task ? `Move: ${s.task.title}` : 'Move task'),
         ]);
       }
+
+      if (r.page === 'alerts') return div('.header', [h1('Alerts')]);
+      if (r.page === 'alert') return div('.header', [
+        div([a('.nav', {attrs:{href: href(r, {page:'alerts', atag:null})}}, '← Back')]),
+        h1(`Alert: ${r.atag}`),
+        button('.adelTag', {attrs:{type:'button', 'data-tag': r.atag}}, 'Delete tag'),
+      ]);
 
       return null;
     };
@@ -567,7 +658,7 @@ function view(state$) {
     const tableHead = () => h('thead', [
       h('tr', [
         on.has('done') ? h('th', ['Done']) : null,
-        on.has('position') ? h('th', ['Pos']) : null, // Pos BEFORE Title
+        on.has('position') ? h('th', ['Pos']) : null,
         on.has('title') ? h('th', ['Title']) : null,
         on.has('due') ? h('th', ['Due']) : null,
         on.has('tags') ? h('th', ['Tags']) : null,
@@ -576,12 +667,10 @@ function view(state$) {
     ]);
 
     const listPage = () => div('.page', [
+      r.page === 'home' ? TopNav(r) : null,
       header(),
       ListControls(r, r.page === 'home' ? newRoot : newChild),
-      h('table', [
-        tableHead(),
-        h('tbody', items.map(t => TaskRow(r, t))),
-      ]),
+      h('table', [tableHead(), h('tbody', items.map(t => TaskRow(r, t)))]),
       items.length === 0 ? div('.empty', ['No tasks match filters.']) : null,
       Pager(r, !!s.hasMore),
     ]);
@@ -609,10 +698,74 @@ function view(state$) {
       ])
     ]);
 
+    const alertsPage = () => {
+      const q = qnorm(r.q);
+      const map = new Map();
+      (s.alerts || []).forEach(x => {
+        const tag = x && x.tag ? String(x.tag) : '';
+        if (!tag) return;
+        if (!map.has(tag)) map.set(tag, {tag, n:0, en:0, latest:null});
+        const it = map.get(tag);
+        it.n += 1;
+        if (x.enabled) it.en += 1;
+        const c = x.created_at ? new Date(x.created_at) : null;
+        if (c && !isNaN(c) && (!it.latest || c > it.latest)) it.latest = c;
+      });
+      const tags = Array.from(map.values())
+        .filter(it => !q || it.tag.toLowerCase().includes(q))
+        .sort((a,b) => a.tag.localeCompare(b.tag));
+
+      return div('.page', [
+        TopNav(r),
+        header(),
+        div([label(['Filter tags ', input('.q', {attrs:{placeholder:'tag', value: r.q}})])]),
+        h('table', [
+          h('thead', [h('tr', [h('th','Tag'), h('th','URLs'), h('th','Enabled'), h('th','Latest')])]),
+          h('tbody', tags.map(it =>
+            h('tr', {key: it.tag}, [
+              h('td', [a('.nav', {attrs:{href: href(r, {page:'alert', atag: it.tag})}}, it.tag)]),
+              h('td', [String(it.n)]),
+              h('td', [String(it.en)]),
+              h('td', [it.latest ? createdFmt(it.latest.toISOString()) : '']),
+            ])
+          ))
+        ]),
+        h1('Add'),
+        form('.anew', [
+          div([label(['Tag ', input('.anew-tag', {attrs:{value: s.anew.tag || '', required:true}})])]),
+          div([label(['URL ', input('.anew-url', {attrs:{value: s.anew.url || '', required:true}})])]),
+          div([button({attrs:{type:'submit'}}, 'Add')]),
+        ]),
+      ]);
+    };
+
+    const alertDetailPage = () => div('.page', [
+      TopNav(r),
+      header(),
+      h('table', [
+        h('thead', [h('tr', [h('th','On'), h('th','URL'), h('th','Created'), h('th','')])]),
+        h('tbody', (s.alertUrls || []).map(x =>
+          h('tr', {key: `${x.tag}|${x.url}`}, [
+            h('td', [input('.atoggle', {attrs:{type:'checkbox', 'data-tag': x.tag, 'data-url': x.url}, props:{checked: !!x.enabled}})]),
+            h('td', [x.url || '']),
+            h('td', [createdFmt(x.created_at)]),
+            h('td', [button('.adel', {attrs:{type:'button', 'data-tag': x.tag, 'data-url': x.url}}, 'Delete')]),
+          ])
+        ))
+      ]),
+      h1('Add URL'),
+      form('.aadd', [
+        div([label(['URL ', input('.aadd-url', {attrs:{value: s.aaddUrl || '', required:true}})])]),
+        div([button({attrs:{type:'submit'}}, 'Add')]),
+      ]),
+    ]);
+
     if (r.page === 'home' || r.page === 'task') return listPage();
     if (r.page === 'new') return newPage();
     if (r.page === 'edit') return editPage();
     if (r.page === 'move') return movePage();
+    if (r.page === 'alerts') return alertsPage();
+    if (r.page === 'alert') return alertDetailPage();
     return div('.page', [header()]);
   });
 }
