@@ -3,18 +3,23 @@ services:
   db:
     image: supabase/postgres:17.6.1.057
     environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-todo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       APPRISE_ENDPOINT: ${APPRISE_ENDPOINT:-http://apprise-api:8000/notify/}
     volumes:
       - db:/var/lib/postgresql/data
       - ./db/init.sh:/docker-entrypoint-initdb.d/zz_00_init.sh:ro
       - ./db/schema.sql:/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -h localhost -p 5432"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
   api:
     image: postgrest/postgrest:v14.1
     depends_on:
       - db
     environment:
-      PGRST_DB_URI: postgres://postgres:${POSTGRES_PASSWORD:-todo}@db:5432/postgres
+      PGRST_DB_URI: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/postgres
       PGRST_DB_SCHEMAS: api
       PGRST_DB_ANON_ROLE: anon
       PGRST_SERVER_PORT: 3000
@@ -28,5 +33,64 @@ services:
       TZ: America/Los_Angeles
     ports:
       - '8082:80'
+  temporal:
+    image: temporalio/auto-setup:1.29.1
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_SEEDS=db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PWD=${POSTGRES_PASSWORD:-postgres}
+      - DBNAME=temporal
+      - VISIBILITY_DBNAME=temporal_visibility
+  temporal-ui:
+    image: temporalio/ui:2.43.3
+    depends_on: [temporal]
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    ports: ["8081:8080"]
+  temporal-init:
+    image: temporalio/admin-tools:1.29.1-tctl-1.18.4-cli-1.5.0
+    depends_on: [temporal]
+    entrypoint: ["/bin/sh","-c"]
+    command: >
+      "
+      set -e;
+      for i in $(seq 1 60); do temporal operator cluster health --address temporal:7233 && break || sleep 1; done;
+
+      temporal operator search-attribute create --address temporal:7233 -n default --name ReminderId --type Keyword || true;
+      temporal operator search-attribute create --address temporal:7233 -n default --name ReminderTags --type KeywordList || true;
+      temporal operator search-attribute create --address temporal:7233 -n default --name ReminderTitle --type Keyword || true;
+      temporal operator search-attribute create --address temporal:7233 -n default --name ReminderText --type Text || true;
+      temporal operator search-attribute create --address temporal:7233 -n default --name ReminderNextFireTime --type Datetime || true;
+      temporal operator search-attribute create --address temporal:7233 -n default --name ReminderEntityType --type Keyword || true;
+      temporal operator search-attribute create --address temporal:7233 -n default --name ReminderEntityId --type Keyword || true;
+      temporal operator search-attribute create --address temporal:7233 -n default --name ReminderTargets --type KeywordList || true;
+      temporal operator search-attribute create --address temporal:7233 -n default --name ReminderScheduleId --type Keyword || true;
+      temporal operator search-attribute create --address temporal:7233 -n default --name ReminderRecordWorkflowId --type Keyword || true;
+
+      echo done.
+      "
+    restart: "no"
+  reminders-api:
+    build: ./reminders
+    depends_on: [temporal]
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_NAMESPACE=default
+      - TASK_QUEUE=reminders
+    ports: ["8083:8000"]
+    command: ["uvicorn", "reminder_api:app", "--host", "0.0.0.0", "--port", "8000"]
+  reminders-worker:
+    build: ./reminders
+    depends_on: [temporal]
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_NAMESPACE=default
+      - TASK_QUEUE=reminders
+    command: ["python", "-u", "reminder_worker.py"]
 volumes:
   db: null
