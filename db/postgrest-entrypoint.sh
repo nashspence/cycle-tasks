@@ -6,7 +6,7 @@ set -eu
 
 echo "[postgrest] waiting for database..."
 while true; do
-  if output=$(psql "$PGRST_DB_URI" -c 'select 1' >/dev/null 2>&1); then
+  if output=$(psql "$PGRST_DB_URI" -c 'select 1' 2>&1); then
     break
   fi
 
