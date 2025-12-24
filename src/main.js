@@ -133,11 +133,13 @@ const reminderFireTime = (due, text) => {
 };
 const reminderSpec = fire => {
   const start_at = toZonedISOString(fire);
-  return start_at ? {
-    calendars:[reminderCalendar(fire)],
-    time_zone_name: fire.zoneName || DateTime.local().zoneName,
-    start_at,
-  } : null;
+  if (!start_at) return null;
+  const use = fire?.zone?.type === 'iana' ? fire : fire.toUTC();
+  return {
+    calendars:[reminderCalendar(use)],
+    time_zone_name: use.zoneName,
+    start_at: use.toISO({suppressMilliseconds: true}),
+  };
 };
 
 function intent(sources) {
