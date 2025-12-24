@@ -24,6 +24,11 @@ services:
       PGRST_DB_ANON_ROLE: anon
       PGRST_SERVER_PORT: 3000
       APPRISE_ENDPOINT: ${APPRISE_ENDPOINT:-http://apprise-api:8000/notify/}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
   apprise-api:
     image: caronc/apprise:latest
   ui:
