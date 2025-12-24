@@ -19,4 +19,4 @@ COPY --chmod=755 db/init.sh db/schema.sql db/postgrest-entrypoint.sh /db/
 
 USER 1000
 ENTRYPOINT ["/db/postgrest-entrypoint.sh"]
-CMD ["/db/postgrest.conf"]
+CMD ["/tmp/postgrest.conf"]

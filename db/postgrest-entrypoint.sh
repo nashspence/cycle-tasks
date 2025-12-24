@@ -20,7 +20,7 @@ done
 echo "[postgrest] database is ready; applying schema"
 PGRST_DB_URI="$PGRST_DB_URI" APPRISE_ENDPOINT="$APPRISE_ENDPOINT" "$(dirname "$0")/init.sh"
 
-CONFIG_PATH=${1:-/db/postgrest.conf}
+CONFIG_PATH=${1:-/tmp/postgrest.conf}
 
 cat >"$CONFIG_PATH" <<EOF
 db-uri = "${PGRST_DB_URI}"
