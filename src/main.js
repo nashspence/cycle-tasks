@@ -10,6 +10,7 @@ import {makeHTTPDriver} from '@cycle/http';
 import {makeHistoryDriver} from '@cycle/history';
 
 const API = `${location.origin}/api`;
+const REMINDERS_API = `${location.origin}/reminders`;
 const J = {'Content-Type': 'application/json', 'Prefer': 'return=representation'};
 const MAXPOS = 2147483647;
 

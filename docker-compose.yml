@@ -75,7 +75,7 @@ services:
       echo done.
       "
     restart: "no"
-  reminders-api:
+  reminders:
     build: ./reminders
     depends_on: [temporal]
     environment:
