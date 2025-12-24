@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+# Ensure bundled utilities are discoverable even if the base image PATH is minimal
+PATH="/usr/bin:/bin:${PATH:-}"
+
 : "${APPRISE_ENDPOINT:=http://apprise-api:8000/notify/}"
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
