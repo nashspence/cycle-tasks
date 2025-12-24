@@ -20,5 +20,15 @@ done
 echo "[postgrest] database is ready; applying schema"
 PGRST_DB_URI="$PGRST_DB_URI" APPRISE_ENDPOINT="$APPRISE_ENDPOINT" "$(dirname "$0")/init.sh"
 
-echo "[postgrest] starting postgrest"
-exec postgrest "$@"
+CONFIG_PATH=${1:-/db/postgrest.conf}
+
+cat >"$CONFIG_PATH" <<EOF
+db-uri = "${PGRST_DB_URI}"
+db-schemas = "${PGRST_DB_SCHEMAS:-api}"
+db-anon-role = "${PGRST_DB_ANON_ROLE:-anon}"
+server-host = "${PGRST_SERVER_HOST:-0.0.0.0}"
+server-port = ${PGRST_SERVER_PORT:-3000}
+EOF
+
+echo "[postgrest] starting postgrest with config ${CONFIG_PATH}"
+exec postgrest "$CONFIG_PATH"
