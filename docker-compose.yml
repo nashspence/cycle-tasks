@@ -25,7 +25,7 @@ services:
       FLYWAY_USER: postgres
       FLYWAY_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       FLYWAY_PLACEHOLDERS_APPRISE_ENDPOINT: ${APPRISE_ENDPOINT:-http://apprise-api:8000/notify/}
-    command: ["flyway", "migrate"]
+    command: migrate
     restart: "no"
   api:
     image: postgrest/postgrest:v14.1
