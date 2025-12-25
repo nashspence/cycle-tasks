@@ -18,6 +18,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      api:
+        condition: service_started
     environment:
       FLYWAY_URL: jdbc:postgresql://db:5432/postgres
       FLYWAY_USER: postgres
@@ -30,8 +32,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      db-migrations:
-        condition: service_completed_successfully
     environment:
       PGRST_DB_URI: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/postgres
       PGRST_DB_SCHEMAS: api
@@ -42,7 +42,10 @@ services:
   ui:
     build: .
     depends_on:
-      - api
+      db-migrations:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
     environment:
       TZ: America/Los_Angeles
     ports:
