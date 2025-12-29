@@ -34,7 +34,7 @@ const toUtcISO = local => {
   return isNaN(d) ? null : d.toISOString();
 };
 
-// ---------------- UI routing/nav (UI responsibility) ----------------
+// ---------------- UI routing/nav ----------------
 
 const parseCols = s => {
   const raw = (s == null || s === '') ? null : String(s);
@@ -196,11 +196,13 @@ function intent(sources) {
   };
 }
 
-// ---------------- model (route orchestration + HTTP only) ----------------
+// ---------------- model (PostgREST) ----------------
 
 function model(sources, actions) {
   const asArr = x => Array.isArray(x) ? x : [];
-  const pickBody = cat => sources.HTTP.select(cat).flatten().map(res => res.body);
+  const pickRes = cat => sources.HTTP.select(cat).flatten();
+  const pickRows = cat => pickRes(cat).map(res => asArr(res.body));
+  const pickOne = cat => pickRows(cat).map(rows => rows[0] || null);
 
   const setKey = (k,v) => prev => ({...base(prev), [k]: v});
   const patch = p => prev => ({...base(prev), ...p});
@@ -208,65 +210,100 @@ function model(sources, actions) {
   const route$ = sources.History.startWith({search:location.search}).map(l => parseRoute(l.search)).remember();
   const state$ = sources.state.stream.remember();
 
-  const listUrl = r => {
+  const jsonHeaders = {'Content-Type':'application/json'};
+  const preferRep = {'Content-Type':'application/json', 'Prefer':'return=representation'};
+
+  // ---- URL helpers ----
+
+  const taskGetUrl = id => `${API_BASE}/tasks?id=eq.${encodeURIComponent(String(id))}`;
+
+  const listTasksUrl = r => {
     const qs = new URLSearchParams();
-    qs.set('page', String(r.p));
-    qs.set('pageSize', String(r.limit));
-    qs.set('includeDone', String(!!r.showDone));
-    if (r.q) qs.set('search', r.q);
-    if (r.tags) qs.set('tags', r.tags);
-    qs.set('sort', r.sort || 'position');
-    qs.set('dir', r.dir || 'asc');
-    // IMPORTANT: omit parentId for root (don't send empty string)
-    if (r.page === 'task' && r.id != null) qs.set('parentId', String(r.id));
+    qs.set('select', '*');
+
+    // parent filter (root if not on a task page)
+    if (r.page === 'task' && r.id != null) qs.set('parent_id', `eq.${r.id}`);
+    else qs.set('parent_id', 'is.null');
+
+    // done filter
+    if (!r.showDone) qs.set('done', 'eq.false');
+
+    // tags contains filter: cs.{a,b}
+    const tgs = tagsFrom(r.tags);
+    if (tgs.length) qs.set('tags', `cs.{${tgs.map(x => x.replace(/"/g,'')).join(',')}}`);
+
+    // search: OR on title/description (simple)
+    if (r.q) {
+      const q = String(r.q).replace(/%/g,'').trim();
+      if (q) qs.set('or', `(title.ilike.*${q}*,description.ilike.*${q}*)`);
+    }
+
+    // sort mapping
+    const sortMap = {position:'position', due:'due_date', created:'created_at', title:'title'};
+    const col = sortMap[r.sort] || 'position';
+    qs.set('order', `${col}.${r.dir}`);
+
+    // pagination: fetch limit+1 to infer hasMore
+    const offset = (Math.max(1, r.p) - 1) * r.limit;
+    qs.set('offset', String(offset));
+    qs.set('limit', String(r.limit + 1));
+
     return `${API_BASE}/tasks?${qs.toString()}`;
   };
 
+  const remindersUrlForTask = taskId =>
+    `${API_BASE}/task_reminders_view?task_id=eq.${encodeURIComponent(String(taskId))}&order=next_fire_at.asc`;
+
+  const alertsReq = r => ({
+    url: `${API_BASE}/rpc/list_alert_tags`,
+    method: 'POST',
+    category: 'alerts',
+    headers: jsonHeaders,
+    send: {_search: r.q || '', _page: Math.max(1, r.p), _page_size: r.limit}
+  });
+
+  const alertUrlsUrl = tag =>
+    `${API_BASE}/apprise_targets?tag=eq.${encodeURIComponent(tag)}&order=created_at.desc`;
+
   const reqsForRoute = r => {
-    if (r.page === 'home') return [{url:listUrl(r), method:'GET', category:'list'}];
+    if (r.page === 'home') return [{url:listTasksUrl(r), method:'GET', category:'list'}];
     if (r.page === 'task' && r.id != null) return [
-      {url:`${API_BASE}/tasks/${r.id}`, method:'GET', category:'task'},
-      {url:listUrl(r), method:'GET', category:'list'},
-      {url:`${API_BASE}/tasks/${r.id}/reminders`, method:'GET', category:'reminders'},
+      {url:taskGetUrl(r.id), method:'GET', category:'task'},
+      {url:listTasksUrl(r), method:'GET', category:'list'},
+      {url:remindersUrlForTask(r.id), method:'GET', category:'reminders'},
     ];
-    if ((r.page === 'edit' || r.page === 'move') && r.id != null) return [
-      {url:`${API_BASE}/tasks/${r.id}`, method:'GET', category:'task'},
-      {url:`${API_BASE}/tasks/${r.id}/reminders`, method:'GET', category:'reminders'},
+    if ((r.page === 'edit' || r.page === 'move' || r.page === 'reminder') && r.id != null) return [
+      {url:taskGetUrl(r.id), method:'GET', category:'task'},
+      {url:remindersUrlForTask(r.id), method:'GET', category:'reminders'},
     ];
-    if (r.page === 'reminder' && r.id != null) return [
-      {url:`${API_BASE}/tasks/${r.id}`, method:'GET', category:'task'},
-      {url:`${API_BASE}/tasks/${r.id}/reminders`, method:'GET', category:'reminders'},
-    ];
-    const alertUrl = () => {
-      const qs = new URLSearchParams();
-      qs.set('page', String(r.p));
-      qs.set('pageSize', String(r.limit));
-      if (r.q) qs.set('search', r.q);
-      return `${API_BASE}/alerts?${qs.toString()}`;
-    };
-    if (r.page === 'alerts') return [{url: alertUrl(), method:'GET', category:'alerts'}];
-    if (r.page === 'alert' && r.atag) return [{url:`${API_BASE}/alerts/${encodeURIComponent(r.atag)}`, method:'GET', category:'aurls'}];
+    if (r.page === 'alerts') return [alertsReq(r)];
+    if (r.page === 'alert' && r.atag) return [{url:alertUrlsUrl(r.atag), method:'GET', category:'aurls'}];
     return [];
   };
+
+  // ---- reducers ----
 
   const init$ = xs.of(prev => (prev === undefined ? initialState : prev));
   const routeR$ = route$.map(r => setKey('route', r));
 
-  const listR$ = pickBody('list').map(b => prev => {
-    const s = base(prev);
-    const items = b && b.items ? asArr(b.items) : asArr(b);
-    const hasMore = !!(b && b.hasMore);
-    return {...s, list: items, hasMore};
-  });
+  const listR$ = xs.combine(route$, pickRows('list').startWith([]))
+    .map(([r, rows]) => prev => {
+      const items = asArr(rows);
+      const hasMore = items.length > r.limit;
+      return {...base(prev), list: items.slice(0, r.limit), hasMore};
+    });
 
-  const taskR$ = pickBody('task').map(t => setKey('task', t || null));
-  const remindersR$ = pickBody('reminders').map(rows => setKey('reminders', asArr(rows)));
-  const alertsR$ = pickBody('alerts').map(b => prev => {
-    const items = b && b.items ? asArr(b.items) : asArr(b);
-    const hasMore = !!(b && b.hasMore);
-    return {...base(prev), alerts: items, alertHasMore: hasMore};
-  });
-  const aurlsR$ = pickBody('aurls').map(rows => setKey('alertUrls', asArr(rows)));
+  const taskR$ = pickOne('task').map(t => setKey('task', t || null));
+  const remindersR$ = pickRows('reminders').map(rows => setKey('reminders', asArr(rows)));
+
+  const alertsR$ = xs.combine(route$, pickRows('alerts').startWith([]))
+    .map(([r, rows]) => prev => {
+      const items = asArr(rows);
+      const hasMore = items.length > r.limit;
+      return {...base(prev), alerts: items.slice(0, r.limit), alertHasMore: hasMore};
+    });
+
+  const aurlsR$ = pickRows('aurls').map(rows => setKey('alertUrls', asArr(rows)));
 
   const formInitR$ = route$.map(r => prev => {
     const s = base(prev);
@@ -278,7 +315,7 @@ function model(sources, actions) {
     return {...s, moveParent:''};
   });
 
-  const formFromTaskR$ = xs.combine(route$, pickBody('task').startWith(null))
+  const formFromTaskR$ = xs.combine(route$, pickOne('task').startWith(null))
     .filter(([r,t]) => r.page === 'edit' && t && t.id === r.id)
     .map(([_,t]) => patch({form:{
       title:t.title||'',
@@ -287,7 +324,7 @@ function model(sources, actions) {
       dueDate: toLocalInput(t.due_date||''),
     }}));
 
-  const moveFromTaskR$ = xs.combine(route$, pickBody('task').startWith(null))
+  const moveFromTaskR$ = xs.combine(route$, pickOne('task').startWith(null))
     .filter(([r,t]) => r.page === 'move' && t && t.id === r.id)
     .map(([_,t]) => setKey('moveParent', t.parent_id == null ? '' : String(t.parent_id)));
 
@@ -304,6 +341,8 @@ function model(sources, actions) {
     formInputR$, anewInputR$, aaddUrlR$, moveParentR$, reminderInputR$,
   );
 
+  // ---- history ----
+
   const history$ = xs.merge(
     actions.nav$.map(url => loc(url,'push')),
     actions.routePatch$.compose(sampleCombine(route$)).map(([p,r]) => loc(href(r,p),'replace')),
@@ -311,16 +350,16 @@ function model(sources, actions) {
 
   const loadReq$ = route$.map(reqsForRoute).map(xs.fromArray).flatten();
 
-  const jsonHeaders = {'Content-Type':'application/json'};
+  // ---- mutations ----
 
   const toggleDoneReq$ = actions.toggleDone$.map(({id,done}) => ({
-    url:`${API_BASE}/tasks/${id}`, method:'PATCH', category:'mut', headers: jsonHeaders, send:{done}
+    url:`${API_BASE}/tasks?id=eq.${id}`, method:'PATCH', category:'mut', headers: preferRep, send:{done}
   }));
 
   const moveReq$ = xs.merge(actions.moveUp$, actions.moveDown$, actions.dropInto$, actions.dropUp$)
     .map(({task_id,new_parent_id,new_position}) => ({
-      url:`${API_BASE}/tasks/${task_id}/move`, method:'POST', category:'mut',
-      headers: jsonHeaders, send:{newParentId:new_parent_id, newPosition:new_position}
+      url:`${API_BASE}/rpc/move_task`, method:'POST', category:'mut',
+      headers: preferRep, send:{task_id, new_parent_id, new_position}
     }));
 
   const submitReq$ = actions.submitKind$
@@ -330,13 +369,14 @@ function model(sources, actions) {
         const title = String(s.form.title||'').trim();
         if (!title) return null;
         return {
-          url:`${API_BASE}/tasks`, method:'POST', category:'create', headers: jsonHeaders,
+          url:`${API_BASE}/rpc/append_task`, method:'POST', category:'create', headers: preferRep,
           send:{
             title,
             description:String(s.form.description||''),
             tags: tagsFrom(s.form.tags),
-            dueDate: toUtcISO(s.form.dueDate),
-            parentId: r.parent,
+            due_date: toUtcISO(s.form.dueDate),
+            done: false,
+            parent_id: r.parent,
           }
         };
       }
@@ -344,19 +384,19 @@ function model(sources, actions) {
         const title = String(s.form.title||'').trim();
         if (!title) return null;
         return {
-          url:`${API_BASE}/tasks/${r.id}`, method:'PATCH', category:'update', headers: jsonHeaders,
+          url:`${API_BASE}/tasks?id=eq.${r.id}`, method:'PATCH', category:'update', headers: preferRep,
           send:{
             title,
             description:String(s.form.description||''),
             tags: tagsFrom(s.form.tags),
-            dueDate: toUtcISO(s.form.dueDate),
+            due_date: toUtcISO(s.form.dueDate),
           }
         };
       }
       if (kind === 'move' && r.page === 'move' && r.id != null) {
         return {
-          url:`${API_BASE}/tasks/${r.id}/move`, method:'POST', category:'mut', headers: jsonHeaders,
-          send:{newParentId: num(s.moveParent), newPosition: MAXPOS}
+          url:`${API_BASE}/rpc/move_task`, method:'POST', category:'mut', headers: preferRep,
+          send:{task_id: r.id, new_parent_id: num(s.moveParent), new_position: MAXPOS}
         };
       }
       return null;
@@ -366,41 +406,53 @@ function model(sources, actions) {
   const deleteReq$ = actions.del$
     .compose(sampleCombine(route$))
     .filter(([_,r]) => r.page === 'edit' && r.id != null)
-    .map(([_,r]) => ({url:`${API_BASE}/tasks/${r.id}`, method:'DELETE', category:'delete'}));
+    .map(([_,r]) => ({url:`${API_BASE}/tasks?id=eq.${r.id}`, method:'DELETE', category:'delete'}));
 
+  // alerts CRUD (direct table)
   const acreateReq$ = actions.acreate$
     .compose(sampleCombine(route$, state$))
     .map(([kind, r, s]) => {
       const tag = kind === 'new' ? String(s.anew.tag||'').trim() : String(r.atag||'').trim();
       const url = kind === 'new' ? String(s.anew.url||'').trim() : String(s.aaddUrl||'').trim();
-      return (tag && url) ? ({url:`${API_BASE}/alerts`, method:'POST', category:'acreate', headers: jsonHeaders, send:{tag,url,enabled:true}}) : null;
+      return (tag && url)
+        ? ({url:`${API_BASE}/apprise_targets`, method:'POST', category:'acreate', headers: preferRep, send:{tag,url,enabled:true}})
+        : null;
     })
     .filter(Boolean);
 
   const atoggleReq$ = actions.atoggle$.map(({tag,url,enabled}) => ({
-    url:`${API_BASE}/alerts/${encodeURIComponent(tag)}?url=${encodeURIComponent(url)}`,
-    method:'PUT', category:'amut', headers: jsonHeaders, send:{enabled}
+    url:`${API_BASE}/apprise_targets?tag=eq.${encodeURIComponent(tag)}&url=eq.${encodeURIComponent(url)}`,
+    method:'PATCH', category:'amut', headers: preferRep, send:{enabled}
   }));
 
   const adelReq$ = actions.adel$.map(({tag,url}) => ({
-    url:`${API_BASE}/alerts/${encodeURIComponent(tag)}?url=${encodeURIComponent(url)}`,
+    url:`${API_BASE}/apprise_targets?tag=eq.${encodeURIComponent(tag)}&url=eq.${encodeURIComponent(url)}`,
     method:'DELETE', category:'amut'
   }));
 
   const adelTagReq$ = actions.adelTag$.map(({tag}) => ({
-    url:`${API_BASE}/alerts/${encodeURIComponent(tag)}`, method:'DELETE', category:'adelTag'
+    url:`${API_BASE}/apprise_targets?tag=eq.${encodeURIComponent(tag)}`, method:'DELETE', category:'adelTag'
   }));
 
+  // reminders: POST into api.task_reminders (before accepts interval text like "10 minutes")
   const reminderCreateReq$ = actions.reminderSubmit$
     .compose(sampleCombine(route$, state$))
     .map(([_, r, s]) => {
       if (r.page !== 'reminder' || !s.task || s.task.id == null) return null;
       const before = String((s.reminderForm && s.reminderForm.before) || '').trim();
       return before
-        ? ({url:`${API_BASE}/tasks/${s.task.id}/reminders`, method:'POST', category:'reminderCreate', headers: jsonHeaders, send:{before}})
+        ? ({
+            url:`${API_BASE}/task_reminders`,
+            method:'POST',
+            category:'reminderCreate',
+            headers: preferRep,
+            send:{task_id: s.task.id, before}
+          })
         : null;
     })
     .filter(Boolean);
+
+  // ---- reload after mutations ----
 
   const reloadTrigger$ = xs.merge(
     sources.HTTP.select('mut').flatten().mapTo(true),
@@ -426,8 +478,10 @@ function model(sources, actions) {
     reminderCreateReq$
   );
 
+  // ---- post nav ----
+
   const backLocFor = (r, parentId) =>
-    parentId == null ? loc(href(r,{page:'home',id:null,parent:null}),'push')
+    parentId == null ? loc(href(r,{page:'home',id:null,parent:null,atag:null}),'push')
       : loc(href(r,{page:'task',id:parentId,parent:null}),'push');
 
   const post$ = xs.merge(
@@ -440,7 +494,8 @@ function model(sources, actions) {
     .compose(sampleCombine(route$, state$))
     .map(([{kind,res}, r, s]) => {
       const body = res && res.body ? res.body : null;
-      const bodyParent = body ? body.parent_id : undefined;
+      const row = Array.isArray(body) ? (body[0] || null) : body;
+      const bodyParent = row ? row.parent_id : undefined;
       if ((kind === 'create' || kind === 'update') && bodyParent !== undefined) return backLocFor(r, bodyParent);
       return backLocFor(r, s.task ? s.task.parent_id : null);
     });
@@ -663,12 +718,14 @@ function view(state$) {
           h1('Reminders'),
           div([a('.nav',{attrs:{href:add}}, 'Add reminder')]),
           rs.length ? h('ul', rs.map(it => {
-            const next = it.nextFireTime || it.next_fire_time || it.next || '';
-            return h('li',{key:it.id || next}, [
+            const next = it.next_fire_at || it.nextFireTime || '';
+            const before = it.before != null ? String(it.before) : '';
+            return h('li',{key:String(it.id || next)}, [
               span([dtFmt(next) || '(unscheduled)']),
               span(' — '),
-              span([it.text || it.before || '(no text)']),
-            ]);
+              span([before || '(no offset)']),
+              it.enabled === false ? span(' (disabled)') : null,
+            ].filter(Boolean));
           })) : div(['No reminders yet.'])
         ]);
       })() : null,
@@ -725,11 +782,11 @@ function view(state$) {
         h('table', [
           h('thead',[h('tr',[h('th','Tag'),h('th','URLs'),h('th','Enabled'),h('th','Latest')])]),
           h('tbody', tags.map(it => {
-            const latest = it.latest || it.latest_at || '';
+            const latest = it.latest || '';
             return h('tr',{key:it.tag}, [
               h('td',[a('.nav',{attrs:{href: href(r,{page:'alert', atag: it.tag, p:1})}}, it.tag)]),
-              h('td',[String(it.url_count ?? it.urlCount ?? 0)]),
-              h('td',[String(it.enabled_count ?? it.enabledCount ?? 0)]),
+              h('td',[String(it.url_count ?? 0)]),
+              h('td',[String(it.enabled_count ?? 0)]),
               h('td',[latest ? dtFmt(latest) : '']),
             ]);
           }))

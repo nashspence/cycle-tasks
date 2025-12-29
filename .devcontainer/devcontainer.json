@@ -41,5 +41,6 @@
     "memory": "4gb",
     "storage": "32gb"
   },
-  "forwardPorts": [3000]
+  "forwardPorts": [80, 8080],
+  "runArgs": ["--network=devcontainer-net"]
 }

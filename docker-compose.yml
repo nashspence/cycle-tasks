@@ -47,7 +47,7 @@ services:
     environment:
       TEMPORAL_ADDRESS: scheduler:7233
     ports:
-      - "8081:8080"
+      - "8080:8080"
     restart: unless-stopped
 
   api:
@@ -62,23 +62,35 @@ services:
       POSTGRES_URI: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/postgres
       TEMPORAL_ADDRESS: scheduler:7233
       NOTIFICATIONS_ENDPOINT: http://notifications:8000/notify/
+      PGRST_ADMIN_SERVER_HOST: 127.0.0.1
+      PGRST_ADMIN_SERVER_PORT: 3001
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/healthz"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3001/ready >/dev/null || exit 1"]
       interval: 10s
       timeout: 2s
       retries: 5
       start_period: 10s
 
-
-  scheduler-worker:
+  task-reminder-worker:
     build: ./api
     depends_on:
       api:
         condition: service_healthy
     environment:
+      API_UPSTREAM: http://api:80/
       TEMPORAL_ADDRESS: scheduler:7233
-      NOTIFICATIONS_ENDPOINT: http://notifications:8000/notify/
-    command: ["python", "-u", "reminder_worker.py"]
+    command: ["python", "-u", "task_reminder_worker.py"]
+    restart: unless-stopped
+
+  task-reminder-drainer:
+    build: ./api
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      POSTGRES_URI: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/postgres
+      TEMPORAL_ADDRESS: scheduler:7233
+    command: ["python", "-u", "task_reminder_drainer.py"]
     restart: unless-stopped
 
   web:
@@ -86,13 +98,13 @@ services:
     depends_on:
       api:
         condition: service_healthy
-      scheduler-worker:
+      task-reminder-worker:
         condition: service_started
     environment:
       TZ: America/Los_Angeles
       API_UPSTREAM: http://api:80/
     ports:
-      - "8082:80"
+      - "80:80"
     restart: unless-stopped
 
 volumes:

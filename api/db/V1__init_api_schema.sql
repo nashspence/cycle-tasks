@@ -247,3 +247,195 @@ grant usage on schema api to anon;
 grant select, insert, update, delete on all tables in schema api to anon;
 grant usage, select on all sequences in schema api to anon;
 grant execute on all functions in schema api to anon;
+
+
+--- Task Reminders ---
+-- Reminders are only for tasks
+create table if not exists api.task_reminders (
+  id         bigint generated always as identity primary key,
+  task_id    bigint not null references api.tasks(id) on delete cascade,
+  before     interval not null,                 -- e.g. '10 minutes'
+  enabled    boolean not null default true,
+  fire_at    timestamptz null,                  -- derived, UTC, null means "no schedule"
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists task_reminders_task_idx on api.task_reminders(task_id);
+create index if not exists task_reminders_fire_at_idx on api.task_reminders(fire_at) where fire_at is not null;
+create unique index if not exists task_reminders_task_before_uq on api.task_reminders(task_id, before);
+
+create table if not exists api.reminder_outbox (
+  id           bigint generated always as identity primary key,
+  op           text not null check (op in ('upsert','cancel')),
+  reminder_id  bigint not null,
+  fire_at      timestamptz null,
+  available_at timestamptz not null default now(),
+  attempts     int not null default 0,
+  last_error   text null,
+  processed_at timestamptz null
+);
+
+create index if not exists reminder_outbox_ready_idx
+  on api.reminder_outbox(available_at, id)
+  where processed_at is null;
+
+create or replace function api._compute_fire_at(_task_id bigint, _before interval, _enabled boolean)
+returns timestamptz language sql stable as $$
+  select case
+    when not _enabled then null
+    when t.done then null
+    when t.due_date is null then null
+    else (t.due_date - _before)
+  end
+  from api.tasks t
+  where t.id = _task_id;
+$$;
+
+create or replace function api.tg_task_reminders_set_fire_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at := now();
+  new.fire_at := api._compute_fire_at(new.task_id, new.before, new.enabled);
+  return new;
+end $$;
+
+drop trigger if exists t_task_reminders_set_fire_at on api.task_reminders;
+create trigger t_task_reminders_set_fire_at
+before insert or update on api.task_reminders
+for each row execute function api.tg_task_reminders_set_fire_at();
+
+create or replace function api.tg_tasks_recompute_reminders_fire_at()
+returns trigger language plpgsql as $$
+begin
+  if tg_op <> 'UPDATE' then return new; end if;
+
+  if (new.due_date is not distinct from old.due_date)
+     and (new.done is not distinct from old.done) then
+    return new;
+  end if;
+
+  update api.task_reminders r
+     set fire_at = api._compute_fire_at(r.task_id, r.before, r.enabled),
+         updated_at = now()
+   where r.task_id = new.id;
+
+  return new;
+end $$;
+
+drop trigger if exists t_tasks_recompute_reminders_fire_at on api.tasks;
+create trigger t_tasks_recompute_reminders_fire_at
+after update on api.tasks
+for each row execute function api.tg_tasks_recompute_reminders_fire_at();
+
+create or replace function api._outbox_insert(_op text, _reminder_id bigint, _fire_at timestamptz)
+returns void
+language sql
+security definer
+set search_path = api, public
+as $$
+  insert into api.reminder_outbox(op, reminder_id, fire_at)
+  values (_op, _reminder_id, _fire_at);
+$$;
+
+grant execute on function api._outbox_insert(text, bigint, timestamptz) to anon;
+alter function api._outbox_insert(text, bigint, timestamptz) owner to postgres;
+
+create or replace function api.tg_task_reminders_outbox()
+returns trigger language plpgsql as $$
+begin
+  if tg_op = 'DELETE' then
+    perform api._outbox_insert('cancel', old.id, null);
+    return old;
+  end if;
+
+  if new.fire_at is null then
+    perform api._outbox_insert('cancel', new.id, null);
+  else
+    perform api._outbox_insert('upsert', new.id, new.fire_at);
+  end if;
+
+  return new;
+end $$;
+
+drop trigger if exists t_task_reminders_outbox on api.task_reminders;
+create trigger t_task_reminders_outbox
+after insert or update or delete on api.task_reminders
+for each row execute function api.tg_task_reminders_outbox();
+
+create or replace function api.tg_tasks_outbox_for_reminders()
+returns trigger language plpgsql as $$
+declare rr record;
+begin
+  if tg_op <> 'UPDATE' then return new; end if;
+
+  if (new.due_date is not distinct from old.due_date)
+     and (new.done is not distinct from old.done)
+     and (new.title is not distinct from old.title)
+     and (new.tags is not distinct from old.tags) then
+    return new;
+  end if;
+
+  for rr in
+    select r.id, r.fire_at
+      from api.task_reminders r
+     where r.task_id = new.id
+  loop
+    perform api._outbox_insert(
+      case when rr.fire_at is null then 'cancel' else 'upsert' end,
+      rr.id,
+      rr.fire_at
+    );
+  end loop;
+
+  return new;
+end $$;
+
+drop trigger if exists t_tasks_outbox_for_reminders on api.tasks;
+create trigger t_tasks_outbox_for_reminders
+after update on api.tasks
+for each row execute function api.tg_tasks_outbox_for_reminders();
+
+create or replace view api.task_reminders_view as
+select
+  r.id,
+  r.task_id,
+  r.before,
+  r.enabled,
+  t.due_date,
+  r.fire_at as next_fire_at
+from api.task_reminders r
+join api.tasks t on t.id = r.task_id;
+
+grant select, insert, update, delete on api.task_reminders to anon;
+grant select on api.task_reminders_view to anon;
+
+revoke all on api.reminder_outbox from anon;
+revoke all on api.reminder_outbox from public;
+
+create or replace function api.fire_task_reminder(_reminder_id bigint)
+returns void language plpgsql as $$
+declare
+  t api.tasks;
+  r api.task_reminders;
+  tag text;
+begin
+  select * into r from api.task_reminders where id = _reminder_id;
+  if not found then return; end if;
+  if not r.enabled or r.fire_at is null then return; end if;
+
+  select * into t from api.tasks where id = r.task_id;
+  if not found then return; end if;
+  if t.done or t.due_date is null then return; end if;
+
+  -- notify each tag (you already have apprise_targets keyed by tag)
+  foreach tag in array coalesce(t.tags, '{}'::text[]) loop
+    perform api._apprise_notify(
+      tag,
+      'Reminder: ' || t.title,
+      format('Reminder for "%s" due %s', t.title, t.due_date::text)
+    );
+  end loop;
+end $$;
+
+
