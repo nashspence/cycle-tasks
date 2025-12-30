@@ -1,10 +1,6 @@
-FROM node:20-alpine AS build
+FROM node:20-alpine
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm install
-COPY src ./src
-RUN npm run build
-
-FROM nginx:alpine
-COPY nginx.conf.template /etc/nginx/templates/default.conf.template
-COPY --from=build /app/dist /usr/share/nginx/html
+COPY server.js .
+ENV PORT=8080
+EXPOSE 8080
+CMD ["node","server.js"]

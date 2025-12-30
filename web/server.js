@@ -105,6 +105,8 @@ const listUrl = (r) => {
   return "/tasks?" + q.toString();
 };
 
+const html = (s, ...v) => s.reduce((a, x, i) => a + x + (v[i] ?? ""), "");
+
 const layout = (title, body) => html`<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark">
