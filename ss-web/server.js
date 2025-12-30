@@ -105,7 +105,7 @@ const listUrl = (r) => {
   return "/tasks?" + q.toString();
 };
 
-const layout = (title, body) => `<!doctype html><meta charset=utf-8>
+const layout = (title, body) => html`<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark">
 <title>${esc(title)}</title>
@@ -145,45 +145,42 @@ addEventListener("resize",()=>{clearTimeout(rt);rt=setTimeout(upd,50)});addEvent
 </script>${body}`;
 
 const nav = (u) =>
-  `<nav>
+  html`<nav>
     <a href="${href(u, { page: "home", id: null, parent: null, atag: null })}">Tasks</a>
     <a href="${href(u, { page: "alerts", id: null, parent: null, atag: null })}">Alerts</a>
   </nav>`;
 
 const pager = (u, r, more) =>
-  `<div class=pg>${
-    r.p > 1 ? `<a href="${href(u, { p: r.p - 1 })}">← Prev</a>` : "<span></span>"
-  }<span>page ${r.p}</span>${
-    more ? `<a href="${href(u, { p: r.p + 1 })}">Next →</a>` : "<span></span>"
-  }</div>`;
+  html`<div class=pg>${r.p > 1 ? `<a href="${href(u, { p: r.p - 1 })}">← Prev</a>` : "<span></span>"
+    }<span>page ${r.p}</span>${more ? `<a href="${href(u, { p: r.p + 1 })}">Next →</a>` : "<span></span>"
+    }</div>`;
 
 const filters = (u, r) => {
   const on = colSet(r);
   const pill = (c, t) =>
-    `<a href="${href(u, { cols: toggleCols(r, c), p: 1 })}">${on.has(c) ? "✓ " : ""}${t}</a>`;
+    html`<a href="${href(u, { cols: toggleCols(r, c), p: 1 })}">${on.has(c) ? "✓ " : ""}${t}</a>`;
   const sel = (n, v, o) =>
-    `<select name="${n}" data-as>${
-      o.map(([x, t]) => `<option value="${x}" ${String(v) === String(x) ? "selected" : ""}>${t}</option>`).join("")
-    }</select>`;
-  const h = (k) => `<input type=hidden name="${k}" value="${esc(u.searchParams.get(k) || "")}">`;
-  return `<details><summary>List options</summary><form method=get>
+    html`<select name="${n}" data-as>${o.map(([x, t]) => `<option value="${x}" ${String(v) === String(x) ? "selected" : ""}>${t}</option>`).join("")
+      }</select>`;
+  const h = (k) => html`<input type=hidden name="${k}" value="${esc(u.searchParams.get(k) || "")}">`;
+  return html`<details><summary>List options</summary><form method=get>
     ${["page", "id", "parent", "atag", "cols"].map(h).join("")}
     <label>Search <input name=q value="${esc(r.q)}" data-as></label><br>
     <label>Tags <input name=tags value="${esc(r.tags)}" data-as></label><br>
     <label><input type=checkbox name=done value=1 ${r.done ? "checked" : ""} data-as> show done</label><br>
     <label><input type=checkbox name=reorder value=1 ${r.reorder ? "checked" : ""} data-as> reorder</label><br>
-    <label>Per page ${sel("limit", r.limit, [["10","10"],["25","25"],["50","50"],["100","100"]])}</label>
-    <label>Sort ${sel("sort", r.sort, [["position","position"],["due","due"],["created","created"],["title","title"]])}</label>
-    <label>Dir ${sel("dir", r.dir, [["asc","asc"],["desc","desc"]])}</label><br>
+    <label>Per page ${sel("limit", r.limit, [["10", "10"], ["25", "25"], ["50", "50"], ["100", "100"]])}</label>
+    <label>Sort ${sel("sort", r.sort, [["position", "position"], ["due", "due"], ["created", "created"], ["title", "title"]])}</label>
+    <label>Dir ${sel("dir", r.dir, [["asc", "asc"], ["desc", "desc"]])}</label><br>
     Columns: ${[
-      pill("done","done"), pill("position","pos"), pill("title","title"),
-      pill("due","due"), pill("tags","tags"), pill("created","created"),
+      pill("done", "done"), pill("position", "pos"), pill("title", "title"),
+      pill("due", "due"), pill("tags", "tags"), pill("created", "created"),
     ].join(" | ")}
   </form></details>`;
 };
 
 const moveBtn = (u, taskId, pid, pos, lab) =>
-  `<form class=i method=post action=/a>
+  html`<form class=i method=post action=/a>
     <input type=hidden name=a value=move>
     <input type=hidden name=back value="${esc(u.search)}">
     <input type=hidden name=task_id value="${taskId}">
@@ -195,20 +192,19 @@ const moveBtn = (u, taskId, pid, pos, lab) =>
 const row = (u, r, t) => {
   const on = colSet(r), ar = r.reorder && r.sort === "position";
   const pid = t.parent_id == null ? "null" : String(t.parent_id);
-  return `<tr draggable=true data-id="${t.id}" data-parent="${pid}">
-    ${on.has("done") ? `<td><form class=i method=post action=/a>
+  return html`<tr draggable=true data-id="${t.id}" data-parent="${pid}">
+    ${on.has("done") ? html`<td><form class=i method=post action=/a>
       <input type=hidden name=a value=toggle>
       <input type=hidden name=back value="${esc(u.search)}">
       <input type=hidden name=id value="${t.id}">
       <input type=checkbox name=done value=1 ${t.done ? "checked" : ""} data-as>
     </form></td>` : ""}
-    ${on.has("position") ? `<td>${esc(t.position ?? "")}</td>` : ""}
-    ${on.has("title") ? `<td>${
-      ar ? moveBtn(u, t.id, pid, (t.position | 0) - 1, "↑") + moveBtn(u, t.id, pid, (t.position | 0) + 2, "↓") : ""
-    }<a href="${href(u, { page: "task", id: t.id })}">${esc(t.title || "(untitled)")}</a></td>` : ""}
-    ${on.has("due") ? `<td>${esc(dt(t.due_date))}</td>` : ""}
-    ${on.has("tags") ? `<td>${esc((t.tags || []).join(" "))}</td>` : ""}
-    ${on.has("created") ? `<td>${esc(dt(t.created_at))}</td>` : ""}
+    ${on.has("position") ? html`<td>${esc(t.position ?? "")}</td>` : ""}
+    ${on.has("title") ? html`<td>${ar ? moveBtn(u, t.id, pid, (t.position | 0) - 1, "↑") + moveBtn(u, t.id, pid, (t.position | 0) + 2, "↓") : ""
+      }<a href="${href(u, { page: "task", id: t.id })}">${esc(t.title || "(untitled)")}</a></td>` : ""}
+    ${on.has("due") ? html`<td>${esc(dt(t.due_date))}</td>` : ""}
+    ${on.has("tags") ? html`<td>${esc((t.tags || []).join(" "))}</td>` : ""}
+    ${on.has("created") ? html`<td>${esc(dt(t.created_at))}</td>` : ""}
   </tr>`;
 };
 
@@ -263,7 +259,7 @@ async function render(req, res) {
       if (r.page === "home" || r.page === "task") {
         const up = task?.parent_id ?? null;
         const hdr = r.page === "task"
-          ? `<div class=up data-parent="${up == null ? "null" : esc(up)}">
+          ? html`<div class=up data-parent="${up == null ? "null" : esc(up)}">
                <a href="${up == null ? href(u, { page: "home", id: null }) : href(u, { page: "task", id: up })}">
                  ← ${up == null ? "Back" : "Up"}
                </a>
@@ -275,23 +271,21 @@ async function render(req, res) {
                <a href="${href(u, { page: "reminder", id: r.id })}">Reminder</a>
              </div>
              <div>${esc(task?.description || "")}</div>`
-          : "<h1>Tasks</h1>";
+          : html`<h1>Tasks</h1>`;
 
         const newHref = href(u, r.page === "task"
           ? { page: "new", parent: r.id }
           : { page: "new", parent: "null" });
 
         const remHtml = r.page === "task"
-          ? `<h2>Reminders</h2><ul>${
-              rem.map((x) =>
-                `<li>${esc(dt(x.next_fire_at || ""))} — ${esc(String(x.before || ""))}${
-                  x.enabled === false ? " (off)" : ""
-                }</li>`
-              ).join("") || "<li>None</li>"
+          ? html`<h2>Reminders</h2><ul>${rem.map((x) =>
+            html`<li>${esc(dt(x.next_fire_at || ""))} — ${esc(String(x.before || ""))}${x.enabled === false ? " (off)" : ""
+              }</li>`
+          ).join("") || html`<li>None</li>`
             }</ul>`
           : "";
 
-        return `${nav(u)}${hdr}${remHtml}
+        return html`${nav(u)}${hdr}${remHtml}
           <div><a href="${newHref}">+ New</a></div>
           ${filters(u, r)}
           <table>${head}<tbody>${list.map((t) => row(u, r, t)).join("")}</tbody></table>
@@ -302,7 +296,7 @@ async function render(req, res) {
         const back = r.parent == null
           ? href(u, { page: "home", id: null })
           : href(u, { page: "task", id: r.parent });
-        return `${nav(u)}<a href="${back}">← Back</a><h1>New</h1>
+        return html`${nav(u)}<a href="${back}">← Back</a><h1>New</h1>
           <form method=post action=/a>
             <input type=hidden name=a value=save>
             <input type=hidden name=mode value=new>
@@ -317,7 +311,7 @@ async function render(req, res) {
       }
 
       if (r.page === "edit") {
-        return `${nav(u)}<a href="${href(u, { page: "task", id: r.id })}">← Back</a><h1>Edit</h1>
+        return html`${nav(u)}<a href="${href(u, { page: "task", id: r.id })}">← Back</a><h1>Edit</h1>
           <form method=post action=/a>
             <input type=hidden name=a value=save>
             <input type=hidden name=mode value=edit>
@@ -333,7 +327,7 @@ async function render(req, res) {
       }
 
       if (r.page === "move") {
-        return `${nav(u)}<a href="${href(u, { page: "task", id: r.id })}">← Back</a><h1>Move</h1>
+        return html`${nav(u)}<a href="${href(u, { page: "task", id: r.id })}">← Back</a><h1>Move</h1>
           <form method=post action=/a>
             <input type=hidden name=a value=move>
             <input type=hidden name=task_id value="${esc(r.id)}">
@@ -345,7 +339,7 @@ async function render(req, res) {
       }
 
       if (r.page === "reminder") {
-        return `${nav(u)}<a href="${href(u, { page: "task", id: r.id })}">← Back</a><h1>Reminder</h1>
+        return html`${nav(u)}<a href="${href(u, { page: "task", id: r.id })}">← Back</a><h1>Reminder</h1>
           <form method=post action=/a>
             <input type=hidden name=a value=reminder>
             <input type=hidden name=task_id value="${esc(r.id)}">
@@ -356,7 +350,7 @@ async function render(req, res) {
       }
 
       if (r.page === "alerts") {
-        return `${nav(u)}<h1>Alerts</h1>
+        return html`${nav(u)}<h1>Alerts</h1>
           <form method=get>
             <input type=hidden name=page value=alerts>
             <label>Filter <input name=q value="${esc(r.q)}" data-as></label>
@@ -364,13 +358,13 @@ async function render(req, res) {
           <table>
             <thead><tr><th>Tag</th><th>URLs</th><th>Enabled</th><th>Latest</th></tr></thead>
             <tbody>${alerts.map((it) =>
-              `<tr>
+          html`<tr>
                 <td><a href="${href(u, { page: "alert", atag: it.tag, p: 1 })}">${esc(it.tag)}</a></td>
                 <td>${esc(it.url_count ?? 0)}</td>
                 <td>${esc(it.enabled_count ?? 0)}</td>
                 <td>${esc(dt(it.latest || ""))}</td>
               </tr>`
-            ).join("")}</tbody>
+        ).join("")}</tbody>
           </table>
           ${pager(u, r, alertMore)}
           <h2>Add</h2>
@@ -384,7 +378,7 @@ async function render(req, res) {
       }
 
       if (r.page === "alert") {
-        return `${nav(u)}<a href="${href(u, { page: "alerts", atag: null })}">← Back</a>
+        return html`${nav(u)}<a href="${href(u, { page: "alerts", atag: null })}">← Back</a>
           <h1>Alert: ${esc(r.atag)}</h1>
           <form class=i method=post action=/a>
             <input type=hidden name=a value=adelTag>
@@ -395,7 +389,7 @@ async function render(req, res) {
           <table>
             <thead><tr><th>On</th><th>URL</th><th>Created</th><th></th></tr></thead>
             <tbody>${aurls.map((x) =>
-              `<tr>
+          html`<tr>
                 <td><form class=i method=post action=/a>
                   <input type=hidden name=a value=atoggle>
                   <input type=hidden name=tag value="${esc(x.tag)}">
@@ -413,7 +407,7 @@ async function render(req, res) {
                   <button>Delete</button>
                 </form></td>
               </tr>`
-            ).join("")}</tbody>
+        ).join("")}</tbody>
           </table>
           <h2>Add URL</h2>
           <form method=post action=/a>
@@ -425,7 +419,7 @@ async function render(req, res) {
           </form>`;
       }
 
-      return `${nav(u)}<h1>Unknown</h1>`;
+      return html`${nav(u)}<h1>Unknown</h1>`;
     })();
 
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -500,9 +494,9 @@ async function act(req, res) {
 
     if (a === "atoggle") await api(
       `/apprise_targets?tag=eq.${encodeURIComponent(b.tag)}&url=eq.${encodeURIComponent(b.url)}`, {
-        method: "PATCH", headers: H,
-        body: JSON.stringify({ enabled: b.enabled === "1" || b.enabled === "on" }),
-      }
+      method: "PATCH", headers: H,
+      body: JSON.stringify({ enabled: b.enabled === "1" || b.enabled === "on" }),
+    }
     );
 
     if (a === "adel") await api(
