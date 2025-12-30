@@ -107,5 +107,19 @@ services:
       - "80:80"
     restart: unless-stopped
 
+  ss-web:
+    build: ./ss-web
+    depends_on:
+      api:
+        condition: service_healthy
+      task-reminder-worker:
+        condition: service_started
+    environment:
+      TZ: America/Los_Angeles
+      API_UPSTREAM: http://api:80/
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+
 volumes:
   db: null
