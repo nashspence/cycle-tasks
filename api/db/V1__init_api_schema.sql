@@ -1,10 +1,6 @@
 create extension if not exists pg_net;
 create schema if not exists api;
 
-create table if not exists api.app_config(key text primary key,value text not null);
-insert into api.app_config(key,value) values ('notifications_endpoint','${notifications_endpoint}')
-on conflict (key) do update set value=excluded.value;
-
 create table if not exists api.tasks(
   id bigint generated always as identity primary key,
   title text not null,
@@ -124,7 +120,7 @@ begin
   where t.id=u.id and t.parent_id is not distinct from parent_id;
 end $$;
 
-create table if not exists api.apprise_targets(
+create table if not exists api.webhook_targets(
   tag text not null,
   url text not null,
   enabled boolean not null default true,
@@ -133,13 +129,13 @@ create table if not exists api.apprise_targets(
   check(length(btrim(tag))>0),
   check(length(btrim(url))>0)
 );
-create index if not exists apprise_targets_tag_enabled_idx on api.apprise_targets(tag) where enabled;
+create index if not exists webhook_targets_tag_enabled_idx on api.webhook_targets(tag) where enabled;
 
 create or replace function api.list_alert_tags(_search text default '',_page int default 1,_page_size int default 25)
 returns table(tag text,url_count bigint,enabled_count bigint,latest timestamptz)
 language sql stable as $$
   select t.tag,count(*) url_count,count(*) filter(where t.enabled) enabled_count,max(t.created_at) latest
-  from api.apprise_targets t
+  from api.webhook_targets t
   where coalesce(_search,'')='' or t.tag ilike ('%'||_search||'%')
   group by t.tag
   order by t.tag asc
@@ -147,17 +143,14 @@ language sql stable as $$
   limit greatest(_page_size,1)+1;
 $$;
 
-create or replace function api._apprise_notify(tag text,title text,body text,type text default 'info')
-returns bigint language plpgsql as $$
-declare urls text;
-declare endpoint text:=coalesce((select value from api.app_config where key='notifications_endpoint'),'http://notifications:8000/notify/');
+create or replace function api._webhook_notify(tag text,title text,body text,type text default 'info',url text default null) returns void language plpgsql as $$
 begin
-  select string_agg(t.url,' ') into urls from api.apprise_targets t where t.tag=_apprise_notify.tag and t.enabled;
-  if urls is null then return null; end if;
-  return net.http_post(url:=endpoint,body:=jsonb_build_object('urls',urls,'title',title,'body',body,'type',type));
+  perform net.http_post(url:=u,body:=jsonb_build_object('title',title,'body',body,'type',type)
+    || case when url is null or length(btrim(url))=0 then '{}'::jsonb else jsonb_build_object('url',url) end)
+  from api.webhook_targets t, lateral unnest(array[t.url]) u where t.tag=_webhook_notify.tag and t.enabled;
 end $$;
 
-create or replace function api.tg_tasks_apprise() returns trigger language plpgsql as $$
+create or replace function api.tg_tasks_webhook() returns trigger language plpgsql as $$
 declare
   new_tags text[]:=coalesce(new.tags,'{}'::text[]);
   old_tags text[]:=coalesce(old.tags,'{}'::text[]);
@@ -167,11 +160,11 @@ declare
   content_changed boolean;
 begin
   if tg_op='INSERT' then
-    foreach t in array new_tags loop perform api._apprise_notify(t,format('[%s] task created',t),format('%s',new.title)); end loop;
+    foreach t in array new_tags loop perform api._webhook_notify(t,format('[%s] task created',t),format('%s',new.title)); end loop;
     return new;
   end if;
   if tg_op='DELETE' then
-    foreach t in array old_tags loop perform api._apprise_notify(t,format('[%s] task deleted',t),format('%s',old.title),'warning'); end loop;
+    foreach t in array old_tags loop perform api._webhook_notify(t,format('[%s] task deleted',t),format('%s',old.title),'warning'); end loop;
     return old;
   end if;
 
@@ -181,11 +174,11 @@ begin
 
   for t in select distinct x from unnest(old_tags||new_tags) as u(x) loop
     if (t=any(new_tags)) and not (t=any(old_tags)) then
-      perform api._apprise_notify(t,format('[%s] task added to tag',t),format('%s',new.title));
+      perform api._webhook_notify(t,format('[%s] task added to tag',t),format('%s',new.title));
     elsif (t=any(old_tags)) and not (t=any(new_tags)) then
-      perform api._apprise_notify(t,format('[%s] task removed from tag',t),format('%s',old.title),'warning');
+      perform api._webhook_notify(t,format('[%s] task removed from tag',t),format('%s',old.title),'warning');
     elsif (t=any(new_tags)) and (due_changed or done_changed or content_changed) then
-      perform api._apprise_notify(
+      perform api._webhook_notify(
         t,format('[%s] task updated',t),
         format('%s%s%s%s',
           new.title,
@@ -199,9 +192,10 @@ begin
   return new;
 end $$;
 
+drop trigger if exists t_tasks_webhook on api.tasks;
 drop trigger if exists t_tasks_apprise on api.tasks;
-create trigger t_tasks_apprise after insert or update or delete on api.tasks
-for each row execute function api.tg_tasks_apprise();
+create trigger t_tasks_webhook after insert or update or delete on api.tasks
+for each row execute function api.tg_tasks_webhook();
 
 create table if not exists api.task_roll_outbox(
   id bigint generated always as identity primary key,
@@ -300,6 +294,7 @@ create table if not exists api.reminders(
   tag text null,
   title text not null default '',
   body text not null default '',
+  url text null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -384,13 +379,13 @@ begin
     if not found then return; end if;
     if t.done or t.due_date is null then return; end if;
     foreach tg in array coalesce(t.tags,'{}'::text[]) loop
-      perform api._apprise_notify(tg,'Reminder: '||t.title,format('Reminder for "%s" due %s',t.title,t.due_date::text));
+      perform api._webhook_notify(tg,'Reminder: '||t.title,format('Reminder for "%s" due %s',t.title,t.due_date::text),'info',r.url);
     end loop;
     return;
   end if;
 
   if r.tag is null or length(btrim(r.tag))=0 then return; end if;
-  perform api._apprise_notify(r.tag,coalesce(nullif(r.title,''),'Reminder'),r.body);
+  perform api._webhook_notify(r.tag,coalesce(nullif(r.title,''),'Reminder'),r.body,'info',r.url);
 end $$;
 
 grant execute on function api.fire_reminder(bigint) to anon;

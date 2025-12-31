@@ -28,7 +28,6 @@ const toLocal = (iso) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 };
 const dt = (iso) => (iso ? new Date(iso).toLocaleString() : "");
-
 const pgIntSec = (s) => {
   s = String(s ?? "").trim();
   if (!s) return 0;
@@ -356,7 +355,7 @@ async function render(req, res) {
     }));
 
     if (r.page === "alert" && r.atag) jobs.push(api(
-      `/apprise_targets?tag=eq.${encodeURIComponent(r.atag)}&order=created_at.desc`
+      `/webhook_targets?tag=eq.${encodeURIComponent(r.atag)}&order=created_at.desc`
     ).then((x) => (aurls = Array.isArray(x) ? x : [])));
 
     await Promise.all(jobs);
@@ -458,12 +457,14 @@ async function render(req, res) {
       }
 
       if (r.page === "trem") {
+        const defUrl = new URL(href(u, { page: "task", id: r.id }), u).toString();
         return html`${nav(u)}<a href="${href(u, { page: "task", id: r.id })}">← Back</a><h1>Reminder</h1>
           <form method=post action=/a>
             <input type=hidden name=a value=trel>
             <input type=hidden name=task_id value="${esc(r.id)}">
             <input type=hidden name=back value="${esc(href(u, { page: "task", id: r.id }))}">
             <label>Before <input name=before required placeholder="e.g. 30 minutes"></label>
+            <label>URL <input name=url value="${esc(defUrl)}"></label>
             <button ${task?.due_date ? "" : "disabled"}>Save</button>
           </form>`;
       }
@@ -526,6 +527,7 @@ async function render(req, res) {
             <label>Tag <input name=tag value="${esc(one?.tag ?? "")}"></label><br>
             <label>Title <input name=title value="${esc(one?.title ?? "")}"></label><br>
             <label>Body <textarea name=body rows=6>${esc(one?.body ?? "")}</textarea></label><br>
+            <label>URL <input name=url value="${esc(one?.url ?? "")}" placeholder="(optional)"></label><br>
             <button>Save</button>
             ${one ? `<button name=a value=rdel>Delete</button>` : ""}
           </form>`;
@@ -690,6 +692,7 @@ async function act(req, res) {
         enabled: true,
         task_id: +b.task_id,
         before: String(b.before || "").trim(),
+        url: String(b.url || "").trim() || null,
       }),
     });
 
@@ -715,6 +718,7 @@ async function act(req, res) {
         tag: String(b.tag || "").trim() || null,
         title: String(b.title || "").trim(),
         body: String(b.body || ""),
+        url: String(b.url || "").trim() || null,
       };
       if (kind !== "one_off") send.at = null;
       if (kind !== "interval") send.every = null;
@@ -728,7 +732,7 @@ async function act(req, res) {
       });
     }
 
-    if (a === "acreate" || a === "aadd") await api("/apprise_targets", {
+    if (a === "acreate" || a === "aadd") await api("/webhook_targets", {
       method: "POST", headers: H,
       body: JSON.stringify({
         tag: String(b.tag || "").trim(),
@@ -738,18 +742,18 @@ async function act(req, res) {
     });
 
     if (a === "atoggle") await api(
-      `/apprise_targets?tag=eq.${encodeURIComponent(b.tag)}&url=eq.${encodeURIComponent(b.url)}`, {
+      `/webhook_targets?tag=eq.${encodeURIComponent(b.tag)}&url=eq.${encodeURIComponent(b.url)}`, {
       method: "PATCH", headers: H,
       body: JSON.stringify({ enabled: b.enabled === "1" || b.enabled === "on" }),
     });
 
     if (a === "adel") await api(
-      `/apprise_targets?tag=eq.${encodeURIComponent(b.tag)}&url=eq.${encodeURIComponent(b.url)}`,
+      `/webhook_targets?tag=eq.${encodeURIComponent(b.tag)}&url=eq.${encodeURIComponent(b.url)}`,
       { method: "DELETE" }
     );
 
     if (a === "adelTag") await api(
-      `/apprise_targets?tag=eq.${encodeURIComponent(b.tag)}`,
+      `/webhook_targets?tag=eq.${encodeURIComponent(b.tag)}`,
       { method: "DELETE" }
     );
 
