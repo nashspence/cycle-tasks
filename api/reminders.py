@@ -17,6 +17,7 @@ CONCURRENCY=int(os.getenv("OUTBOX_CONCURRENCY","50"))
 
 WF_INBOX="temporal_inbox"
 WF_NOOP="noop"
+_TCLIENT=None
 
 def _utc(v):
   if v is None: return None
@@ -61,8 +62,8 @@ async def _upsert(c,sid,sch):
 async def _next_time(c,sid):
   try:
     d=await c.get_schedule_handle(sid).describe()
-    nxt=(d.info.next_action_times[0] if d and d.info and d.info.next_action_times else None)
-    return nxt.astimezone(timezone.utc) if nxt else None
+    xs=(d.info.next_action_times if d and d.info else None) or []
+    return xs[0].astimezone(timezone.utc) if xs else None
   except Exception:
     return None
 
@@ -125,7 +126,14 @@ async def _db_put(kind,payload):
 @activity.defn
 async def inbox(msg:dict)->None:
   msg=msg or {}
-  await _db_put(str(msg.get("kind") or ""), msg.get("payload") or {})
+  kind=str(msg.get("kind") or "")
+  payload=msg.get("payload") or {}
+  await _db_put(kind,payload)
+  if kind=="fire_reminder" and _TCLIENT:
+    sid=payload.get("sid")
+    rid=payload.get("reminder_id")
+    if sid and rid and (await _next_time(_TCLIENT,sid)) is None:
+      await _db_put("gc_exhausted",{"reminder_id":rid,"sid":sid})
 
 @workflow.defn(name=WF_INBOX)
 class InboxWorkflow:
@@ -159,26 +167,40 @@ async def _proc(pg,c,row):
     sp=_spec(sch if isinstance(sch,dict) else json.loads(sch))
     if sid.startswith("reminder-"):
       rid=int(sid.split("-",1)[1])
-      act=ScheduleActionStartWorkflow(WF_INBOX,args=[{"kind":"fire_reminder","payload":{"reminder_id":rid}}],id=sid,task_queue=TASK_QUEUE)
+      act=ScheduleActionStartWorkflow(
+        WF_INBOX,
+        args=[{"kind":"fire_reminder","payload":{"reminder_id":rid,"sid":sid}}],
+        id=sid,task_queue=TASK_QUEUE
+      )
     else:
       act=ScheduleActionStartWorkflow(WF_NOOP,args=[],id=sid,task_queue=TASK_QUEUE)
 
     await _upsert(c,sid,Schedule(action=act,spec=sp,policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)))
 
-    if sid.startswith("taskroll-"):
+    nxt=await _next_time(c,sid)
+    if sid.startswith("taskroll-") and nxt:
       tid=int(sid.split("-",1)[1])
-      nxt=await _next_time(c,sid)
-      if nxt:
-        await pg.execute("insert into api.temporal_inbox(kind,payload) values('set_task_due',$1::jsonb)",
-          json.dumps({"task_id":tid,"due_date":nxt.isoformat()}))
+      await pg.execute(
+        "insert into api.temporal_inbox(kind,payload) values('set_task_due',$1::jsonb)",
+        json.dumps({"task_id":tid,"due_date":nxt.isoformat()})
+      )
+
+    if nxt is None:
+      await _del(c,sid)
+      if sid.startswith("reminder-"):
+        await pg.execute("delete from api.reminders where id=$1", int(sid.split("-",1)[1]))
+      elif sid.startswith("taskroll-"):
+        await pg.execute("update api.tasks set schedule=null where id=$1", int(sid.split("-",1)[1]))
 
     await pg.execute(MARK_OK,oid)
   except Exception as e:
     await pg.execute(MARK_FAIL,oid,str(e),BACKOFF(att))
 
 async def run_worker():
+  global _TCLIENT
   _db_start()
   c=await Client.connect(TEMPORAL_ADDRESS,namespace=TEMPORAL_NAMESPACE)
+  _TCLIENT=c
   from temporalio.worker import Worker
   try:
     await Worker(c,task_queue=TASK_QUEUE,workflows=[InboxWorkflow,NoopWorkflow],activities=[inbox]).run()

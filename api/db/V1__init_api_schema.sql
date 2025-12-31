@@ -297,7 +297,7 @@ revoke all on api.temporal_outbox from public;
 
 create table api.temporal_inbox(
   id bigint generated always as identity primary key,
-  kind text not null check (kind in ('fire_reminder','set_task_due')),
+  kind text not null check (kind in ('fire_reminder','set_task_due','gc_exhausted')),
   payload jsonb not null,
   created_at timestamptz not null default now(),
   processed_at timestamptz null
@@ -379,6 +379,9 @@ begin
     tid:=(new.payload->>'task_id')::bigint;
     dd:=(new.payload->>'due_date')::timestamptz;
     if tid is not null then update api.tasks set due_date=dd where id=tid; end if;
+  elsif new.kind='gc_exhausted' then
+    rid:=(new.payload->>'reminder_id')::bigint;
+    if rid is not null then delete from api.reminders where id=rid; end if;
   end if;
   update api.temporal_inbox set processed_at=now() where id=new.id;
   return new;
