@@ -12,10 +12,6 @@ services:
       timeout: 5s
       retries: 30
 
-  notifications:
-    image: caronc/apprise:latest
-    restart: unless-stopped
-
   scheduler:
     image: temporalio/auto-setup:1.29.1
     depends_on:
@@ -60,7 +56,6 @@ services:
     environment:
       POSTGRES_URI: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/postgres
       TEMPORAL_ADDRESS: scheduler:7233
-      NOTIFICATIONS_ENDPOINT: http://notifications:8000/notify/
       PGRST_ADMIN_SERVER_HOST: 127.0.0.1
       PGRST_ADMIN_SERVER_PORT: 3001
     healthcheck:

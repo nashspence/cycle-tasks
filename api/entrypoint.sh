@@ -25,7 +25,6 @@ flyway \
   -user="$user" \
   -password="$pass" \
   -validateMigrationNaming=true \
-  ${NOTIFICATIONS_ENDPOINT:+-placeholders.notifications_endpoint="$NOTIFICATIONS_ENDPOINT"} \
   migrate
 
 for i in $(seq 1 60); do temporal operator cluster health --address "$ADDR" && break || sleep 1; done
