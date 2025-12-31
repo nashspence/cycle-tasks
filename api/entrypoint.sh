@@ -37,6 +37,7 @@ db-schema = "${PGRST_DB_SCHEMA:-api}"
 db-anon-role = "${PGRST_DB_ANON_ROLE:-anon}"
 server-host = "0.0.0.0"
 server-port = ${PORT:-80}
+log-level = "info"
 EOF
 
 [ -n "${PGRST_JWT_SECRET:-}" ] && echo "jwt-secret = \"${PGRST_JWT_SECRET}\"" >>/tmp/postgrest.conf

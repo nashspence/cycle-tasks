@@ -53,7 +53,10 @@ const parsePost = async (req) => {
   const raw = await readBody(req);
   const ct = req.headers["content-type"] || "";
   if (ct.includes("application/json")) return raw ? JSON.parse(raw) : {};
-  return Object.fromEntries(new URLSearchParams(raw).entries());
+  const sp = new URLSearchParams(raw);
+  const o = {};
+  for (const [k, v] of sp) o[k] = k in o ? [].concat(o[k], v) : v;
+  return o;
 };
 
 const api = async (path, opt = {}) => {
@@ -138,6 +141,7 @@ const layout = (title, body) => html`<!doctype html><meta charset=utf-8>
   :root { color-scheme: dark; }
   .c thead{display:none}.c tr{display:block;margin:.5em 0;border:1px solid #ccc}.c td{display:block;border:0}
   .c td:before{content:attr(data-l) ": ";font-weight:bold}
+  [hidden]{display:none!important}
 </style>
 <script>
 addEventListener("change",e=>{
@@ -167,6 +171,24 @@ addEventListener("drop",async e=>{
 let rt,ch=()=>ch??=(s=>{s=document.createElement("span");s.textContent="0";s.style.cssText="position:absolute;visibility:hidden;font:inherit";document.body.append(s);const w=s.getBoundingClientRect().width;s.remove();return w})();
 const upd=()=>{const cw=12*ch();document.querySelectorAll("table").forEach(t=>{const hs=[...t.querySelectorAll("th")].map(x=>x.textContent.trim());const n=hs.length||t.rows[0]?.cells.length||0;[...t.tBodies].forEach(b=>[...b.rows].forEach(r=>[...r.cells].forEach((c,i)=>c.dataset.l||(c.dataset.l=hs[i]||""))));t.classList.toggle("c",innerWidth<n*cw)})};
 addEventListener("resize",()=>{clearTimeout(rt);rt=setTimeout(upd,50)});addEventListener("DOMContentLoaded",upd);
+
+const tz=()=>Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";
+addEventListener("DOMContentLoaded",()=>document.querySelectorAll("input[name=tz],input[name=roll_tz]").forEach(i=>{if(!i.value)i.value=tz()}));
+
+const rollKindVis=f=>{
+  const k=(f.roll_kind?.value||"interval").toLowerCase();
+  f.querySelectorAll("[data-rollk]").forEach(x=>x.hidden=x.dataset.rollk!==k);
+};
+const rollVis=f=>{
+  const b=f.querySelector("[data-rollbox]"); if(b) b.hidden=!f.roll?.checked;
+  if(f.roll?.checked) rollKindVis(f);
+};
+addEventListener("change",e=>{
+  const f=e.target.closest("form"); if(!f) return;
+  if(e.target.name==="roll") rollVis(f);
+  if(e.target.name==="roll_kind") rollKindVis(f);
+});
+addEventListener("DOMContentLoaded",()=>document.querySelectorAll("form").forEach(rollVis));
 </script>${body}`;
 
 const nav = (u) =>
@@ -232,6 +254,63 @@ const row = (u, r, t) => {
     ${on.has("tags") ? html`<td>${esc((t.tags || []).join(" "))}</td>` : ""}
     ${on.has("created") ? html`<td>${esc(dt(t.created_at))}</td>` : ""}
   </tr>`;
+};
+
+const bestInt = (sec) => {
+  sec = +sec || 0;
+  const t = [[604800,"weeks"],[86400,"days"],[3600,"hours"],[60,"minutes"],[1,"seconds"]];
+  for (const [m,u] of t) if (sec % m === 0) return [sec / m, u];
+  return [sec, "seconds"];
+};
+
+const rollUi = (t) => {
+  const s = t?.roll_spec || null;
+  const k = (s?.kind || "cron");
+  const [n0,u0] = k==="interval" ? bestInt(s?.every_seconds) : [1,"days"];
+  const cal = k==="calendar" ? (s?.calendars?.[0] || {}) : {};
+  const hh = (cal.hour?.[0] ?? 9), mm = (cal.minute?.[0] ?? 0);
+  const p2 = (x) => String(+x||0).padStart(2,"0");
+  const dow = new Set((cal.day_of_week || []).map((x)=>+x));
+  return html`
+  <label><input type=checkbox name=roll value=1 ${t?.roll ? "checked" : ""}> auto-advance</label><br>
+  <div data-rollbox ${t?.roll ? "" : "hidden"}>
+    <label>Time zone <input name=roll_tz value="${esc(t?.roll_tz || "")}" placeholder="(auto)"></label><br>
+    <label>Kind <select name=roll_kind>
+      ${["interval","cron","calendar"].map((x)=>`<option value="${x}" ${k===x?"selected":""}>${x}</option>`).join("")}
+    </select></label><br>
+
+    <div data-rollk=interval>
+      <label>Every <input name=roll_n type=number min=1 value="${esc(n0)}"></label>
+      <select name=roll_u>${["seconds","minutes","hours","days","weeks"].map(x=>`<option value="${x}" ${u0===x?"selected":""}>${x}</option>`).join("")}</select>
+    </div><br>
+
+    <div data-rollk=cron>
+      <label>Cron <input name=roll_cron placeholder="0 9 * * MON" value="${esc(k==="cron" ? (s?.cron||"") : "")}"></label>
+    </div><br>
+
+    <div data-rollk=calendar>
+      <label>Time <input name=roll_time type=time value="${esc(p2(hh)+":"+p2(mm))}"></label>
+      Days:
+      ${[[1,"Mon"],[2,"Tue"],[3,"Wed"],[4,"Thu"],[5,"Fri"],[6,"Sat"],[7,"Sun"]].map(([v,l])=>
+        `<label><input type=checkbox name=roll_dow value="${v}" ${dow.has(v)?"checked":""}>${l}</label>`
+      ).join(" ")}
+    </div>
+  </div>`;
+};
+
+const rollSpecFrom = (b) => {
+  const kind = String(b.roll_kind || "interval");
+  const tz = String(b.roll_tz || "UTC").trim() || "UTC";
+  if (kind === "interval") {
+    const n = Math.max(1, +b.roll_n || 1);
+    const u = String(b.roll_u || "days");
+    const m = { seconds:1, minutes:60, hours:3600, days:86400, weeks:604800 }[u] || 86400;
+    return { tz, spec: { kind, every_seconds: n * m } };
+  }
+  if (kind === "cron") return { tz, spec: { kind, cron: String(b.roll_cron || "").trim() } };
+  const t = String(b.roll_time || "09:00").split(":"), hh = +t[0] || 9, mm = +t[1] || 0;
+  const d = [].concat(b.roll_dow || []).map((x) => +x).filter((x) => x >= 1 && x <= 7);
+  return { tz, spec: { kind: "calendar", calendars: [{ day_of_week: d, hour: [hh], minute: [mm], second: [0] }] } };
 };
 
 async function render(req, res) {
@@ -344,6 +423,7 @@ async function render(req, res) {
             <label>Description <textarea name=description rows=6></textarea></label><br>
             <label>Tags <input name=tags></label><br>
             <label>Due <input type=datetime-local name=due></label><br>
+            ${rollUi(null)}
             <button>Create</button>
           </form>`;
       }
@@ -359,6 +439,7 @@ async function render(req, res) {
             <label>Description <textarea name=description rows=6>${esc(task?.description || "")}</textarea></label><br>
             <label>Tags <input name=tags value="${esc((task?.tags || []).join(" "))}"></label><br>
             <label>Due <input type=datetime-local name=due value="${esc(task?.due_date ? toLocal(task.due_date) : "")}"></label><br>
+            ${rollUi(task)}
             <button>Save</button>
             <button name=a value=delete>Delete</button>
           </form>`;
@@ -441,7 +522,7 @@ async function render(req, res) {
             <label>Cron <input name=cron value="${esc(one?.cron ?? "")}" placeholder="e.g. 0 9 * * 1-5"></label><br>
             <label>Start <input type=datetime-local name=start_at value="${esc(one?.start_at ? toLocal(one.start_at) : "")}"></label><br>
             <label>End <input type=datetime-local name=end_at value="${esc(one?.end_at ? toLocal(one.end_at) : "")}"></label><br>
-            <label>TZ <input name=tz value="${esc(one?.tz || "UTC")}"></label><br>
+            <label>TZ <input name=tz value="${esc(one?.tz || "")}" placeholder="(auto)"></label><br>
             <label>Tag <input name=tag value="${esc(one?.tag ?? "")}"></label><br>
             <label>Title <input name=title value="${esc(one?.title ?? "")}"></label><br>
             <label>Body <textarea name=body rows=6>${esc(one?.body ?? "")}</textarea></label><br>
@@ -558,21 +639,44 @@ async function act(req, res) {
     if (a === "save") {
       const title = String(b.title || "").trim();
       if (!title) throw new Error("Title required");
+
+      const roll = b.roll === "1" || b.roll === "on";
       const send = {
         title,
         description: String(b.description || ""),
         tags: tagsFrom(b.tags),
         due_date: toUtcISO(b.due),
+        roll,
+        roll_tz: null,
+        roll_spec: null,
       };
-      if (b.mode === "new") await api("/rpc/append_task", {
-        method: "POST", headers: H,
-        body: JSON.stringify({
-          ...send, done: false,
-          parent_id:
-            b.parent === "" || b.parent == null || b.parent === "null" ? null : +b.parent,
-        }),
-      });
-      else await api(`/tasks?id=eq.${+b.id}`, {
+      if (roll) {
+        const { tz, spec } = rollSpecFrom(b);
+        if (!spec || typeof spec !== "object") throw new Error("Auto-advance: invalid roll spec");
+        send.roll_tz = tz;
+        send.roll_spec = spec;
+      } else {
+        send.roll_tz = String(b.roll_tz || "UTC").trim() || "UTC";
+      }
+
+      if (b.mode === "new") {
+        const created = await api("/rpc/append_task", {
+          method: "POST", headers: H,
+          body: JSON.stringify({
+            title: send.title,
+            description: send.description,
+            tags: send.tags,
+            due_date: send.due_date,
+            done: false,
+            parent_id: b.parent === "" || b.parent == null || b.parent === "null" ? null : +b.parent,
+          }),
+        });
+        const id = created?.id ?? created?.[0]?.id;
+        if (id) await api(`/tasks?id=eq.${+id}`, {
+          method: "PATCH", headers: H,
+          body: JSON.stringify({ roll: send.roll, roll_tz: send.roll_tz, roll_spec: send.roll_spec }),
+        });
+      } else await api(`/tasks?id=eq.${+b.id}`, {
         method: "PATCH", headers: H, body: JSON.stringify(send),
       });
     }
