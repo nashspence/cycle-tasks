@@ -1,51 +1,42 @@
+-- schema.sql
 create extension if not exists pg_net;
-create schema if not exists api;
+drop schema if exists api cascade;
+create schema api;
 
-create table if not exists api.tasks(
+create table api.tasks(
   id bigint generated always as identity primary key,
   title text not null,
   description text not null default '',
   tags text[] null,
   alert_url text null,
   due_date timestamptz null,
-  due_date_pending boolean not null default false,
   done boolean not null default false,
   trashed boolean not null default false,
   created_at timestamptz not null default now(),
   parent_id bigint null references api.tasks(id) on delete cascade,
   position int not null default 0,
-  roll boolean not null default false,
-  roll_spec jsonb null,
-  roll_tz text not null default 'UTC',
+  schedule jsonb null,
   last_completed_at timestamptz null,
   constraint title_nonempty check (length(btrim(title))>0),
   constraint tags_not_empty_strings check (tags is null or not (''=any(tags))),
-  constraint tasks_roll_chk check (
-    not roll or (
-      roll_spec is not null and jsonb_typeof(roll_spec)='object'
-      and (roll_spec->>'kind') in ('interval','cron','calendar')
-      and length(btrim(roll_tz))>0
-    )
-  ),
+  constraint schedule_object check (schedule is null or jsonb_typeof(schedule)='object'),
   check (position>=0),
   check (parent_id is null or parent_id<>id)
 );
 
-do $$begin
-  alter table api.tasks
-  add constraint tasks_roll_spec_object_chk
-  check (roll_spec is null or jsonb_typeof(roll_spec)='object');
-exception when duplicate_object then end$$;
+create index tasks_parent_position_idx on api.tasks(parent_id,position);
+create unique index tasks_parent_pos_uq on api.tasks((coalesce(parent_id,0)),position);
+create index tasks_tags_gin on api.tasks using gin(tags);
+create index tasks_due_date_idx on api.tasks(due_date) where due_date is not null;
+create index tasks_done_idx on api.tasks(done);
+create index tasks_created_at_idx on api.tasks(created_at);
+create index tasks_has_schedule_idx on api.tasks(id) where schedule is not null;
 
-create index if not exists tasks_parent_position_idx on api.tasks(parent_id,position);
-create unique index if not exists tasks_parent_pos_uq on api.tasks((coalesce(parent_id,0)),position);
-create index if not exists tasks_tags_gin on api.tasks using gin(tags);
-create index if not exists tasks_due_date_idx on api.tasks(due_date) where due_date is not null;
-create index if not exists tasks_done_idx on api.tasks(done);
-create index if not exists tasks_created_at_idx on api.tasks(created_at);
-create index if not exists tasks_roll_idx on api.tasks(roll) where roll;
+alter table api.tasks add column search tsvector
+generated always as (to_tsvector('simple',coalesce(title,'')||' '||coalesce(description,''))) stored;
+create index tasks_search_gin on api.tasks using gin(search);
 
-create table if not exists api.task_history(
+create table api.task_history(
   id bigint generated always as identity primary key,
   task_id bigint not null references api.tasks(id) on delete cascade,
   change text not null check (change in ('create','update','delete')),
@@ -53,11 +44,7 @@ create table if not exists api.task_history(
   new_values jsonb null,
   created_at timestamptz not null default now()
 );
-create index if not exists task_history_task_idx on api.task_history(task_id);
-
-alter table api.tasks add column if not exists search tsvector
-generated always as (to_tsvector('simple',coalesce(title,'')||' '||coalesce(description,''))) stored;
-create index if not exists tasks_search_gin on api.tasks using gin(search);
+create index task_history_task_idx on api.task_history(task_id);
 
 create or replace function api.append_task(
   title text,description text default '',tags text[] default null,alert_url text default null,
@@ -133,7 +120,7 @@ begin
   where t.id=u.id and t.parent_id is not distinct from parent_id;
 end $$;
 
-create table if not exists api.webhook_targets(
+create table api.webhook_targets(
   tag text not null,
   url text not null,
   enabled boolean not null default true,
@@ -142,10 +129,13 @@ create table if not exists api.webhook_targets(
   check(length(btrim(tag))>0),
   check(length(btrim(url))>0)
 );
-create index if not exists webhook_targets_tag_enabled_idx on api.webhook_targets(tag) where enabled;
+create index webhook_targets_tag_enabled_idx on api.webhook_targets(tag) where enabled;
 
-create or replace function api.list_alert_tags(_search text default '',_page int default 1,_page_size int default 25)
-returns table(tag text,url_count bigint,enabled_count bigint,latest timestamptz)
+create or replace function api.list_alert_tags(
+  _search text default '',
+  _page int default 1,
+  _page_size int default 25
+) returns table(tag text,url_count bigint,enabled_count bigint,latest timestamptz)
 language sql stable as $$
   select t.tag,count(*) url_count,count(*) filter(where t.enabled) enabled_count,max(t.created_at) latest
   from api.webhook_targets t
@@ -156,11 +146,25 @@ language sql stable as $$
   limit greatest(_page_size,1)+1;
 $$;
 
-create or replace function api._webhook_notify(tag text,title text,body text,type text default 'info',url text default null) returns void language plpgsql as $$
+create or replace function api._webhook_notify(
+  tag text,
+  title text,
+  body text,
+  type text default 'info',
+  _url text default null
+) returns void language plpgsql as $$
 begin
-  perform net.http_post(url:=u,body:=jsonb_build_object('title',title,'body',body,'type',type)
-    || case when url is null or length(btrim(url))=0 then '{}'::jsonb else jsonb_build_object('url',url) end)
-  from api.webhook_targets t, lateral unnest(array[t.url]) u where t.tag=_webhook_notify.tag and t.enabled;
+  perform net.http_post(
+    url:=u,
+    body:=jsonb_build_object('title',title,'body',body,'type',type)
+      || case
+        when _url is null or length(btrim(_url))=0 then '{}'::jsonb
+        else jsonb_build_object('url',_url)
+      end
+  )
+  from api.webhook_targets t
+  cross join lateral unnest(array[t.url]) u
+  where t.tag=_webhook_notify.tag and t.enabled;
 end $$;
 
 create or replace function api.tg_tasks_webhook() returns trigger language plpgsql as $$
@@ -202,6 +206,10 @@ begin
   values(new.id,ch,o,n);
   return new;
 end $$;
+
+drop trigger if exists t_tasks_webhook on api.tasks;
+create trigger t_tasks_webhook after insert or update or delete on api.tasks
+for each row execute function api.tg_tasks_webhook();
 
 create or replace function api.tg_task_history_alerts() returns trigger language plpgsql as $$
 declare
@@ -250,205 +258,136 @@ begin
   return new;
 end $$;
 
-drop trigger if exists t_tasks_webhook on api.tasks;
-drop trigger if exists t_tasks_apprise on api.tasks;
-create trigger t_tasks_webhook after insert or update or delete on api.tasks
-for each row execute function api.tg_tasks_webhook();
-
 drop trigger if exists t_task_history_alerts on api.task_history;
 create trigger t_task_history_alerts after insert on api.task_history
 for each row execute function api.tg_task_history_alerts();
 
-create table if not exists api.task_roll_outbox(
+create table api.reminders(
   id bigint generated always as identity primary key,
-  op text not null check (op in ('sync','roll','delete')),
-  task_id bigint not null,
-  available_at timestamptz not null default now(),
-  attempts int not null default 0,
-  last_error text null,
-  processed_at timestamptz null
-);
-create index if not exists task_roll_outbox_ready_idx on api.task_roll_outbox(available_at,id) where processed_at is null;
-create index if not exists task_roll_outbox_task_idx on api.task_roll_outbox(task_id) where processed_at is null;
-revoke all on api.task_roll_outbox from anon; revoke all on api.task_roll_outbox from public;
-
-create or replace function api._task_roll_outbox(_op text,_task_id bigint) returns void
-language sql security definer set search_path=api,public as $$
-  insert into api.task_roll_outbox(op,task_id) values($1,$2);
-$$;
-grant execute on function api._task_roll_outbox(text,bigint) to anon;
-alter function api._task_roll_outbox(text,bigint) owner to postgres;
-
-create or replace function api.tg_tasks_roll_complete() returns trigger language plpgsql as $$
-declare k text; secs int;
-begin
-  if tg_op='UPDATE' and (not old.done) and new.done and new.roll and new.roll_spec is not null then
-    new.done:=false; new.last_completed_at:=now(); new.due_date_pending:=false;
-    k:=lower(coalesce(new.roll_spec->>'kind',''));
-    if k='interval' then
-      secs:=coalesce((new.roll_spec->>'every_seconds')::int,0);
-      if secs>0 then new.due_date:=coalesce(new.due_date,now()) + (secs*interval '1 second'); end if;
-    elsif k in ('cron','calendar') then
-      new.due_date_pending:=true;
-      perform api._task_roll_outbox('sync',new.id);
-      perform api._task_roll_outbox('roll',new.id);
-    end if;
-  end if;
-  return new;
-end $$;
-
-drop trigger if exists t_tasks_roll_complete on api.tasks;
-create trigger t_tasks_roll_complete before update on api.tasks
-for each row execute function api.tg_tasks_roll_complete();
-
-create or replace function api.tg_tasks_roll_lifecycle() returns trigger language plpgsql as $$
-declare ok_old boolean; ok_new boolean; k text;
-begin
-  if tg_op='INSERT' then
-    if new.roll and new.roll_spec is not null then
-      k:=lower(coalesce(new.roll_spec->>'kind',''));
-      if k in ('cron','calendar') then perform api._task_roll_outbox('sync',new.id); end if;
-    end if;
-    return new;
-  end if;
-
-  if tg_op='UPDATE' then
-    if (new.roll is distinct from old.roll) or (new.roll_spec is distinct from old.roll_spec) or (new.roll_tz is distinct from old.roll_tz) then
-      ok_old := old.roll and old.roll_spec is not null and lower(coalesce(old.roll_spec->>'kind','')) in ('cron','calendar');
-      ok_new := new.roll and new.roll_spec is not null and lower(coalesce(new.roll_spec->>'kind','')) in ('cron','calendar');
-      if ok_old and not ok_new then perform api._task_roll_outbox('delete',new.id);
-      elsif ok_new then perform api._task_roll_outbox('sync',new.id);
-      elsif (not ok_new) then perform api._task_roll_outbox('delete',new.id); end if;
-    end if;
-    return new;
-  end if;
-
-  return new;
-end $$;
-
-drop trigger if exists t_tasks_roll_lifecycle on api.tasks;
-create trigger t_tasks_roll_lifecycle after insert or update on api.tasks
-for each row execute function api.tg_tasks_roll_lifecycle();
-
-create or replace function api.tg_tasks_roll_delete() returns trigger language plpgsql as $$
-begin if tg_op='DELETE' then perform api._task_roll_outbox('delete',old.id); end if; return old; end $$;
-
-drop trigger if exists t_tasks_roll_delete on api.tasks;
-create trigger t_tasks_roll_delete after delete on api.tasks
-for each row execute function api.tg_tasks_roll_delete();
-
-grant usage on schema api to anon;
-grant select,insert,update,delete on all tables in schema api to anon;
-grant usage,select on all sequences in schema api to anon;
-grant execute on all functions in schema api to anon;
-
-create table if not exists api.reminders(
-  id bigint generated always as identity primary key,
-  kind text not null check (kind in ('one_off','interval','cron','task_due_before')),
   enabled boolean not null default true,
-  task_id bigint null references api.tasks(id) on delete cascade,
-  before interval null,
-  at timestamptz null,
-  every interval null,
-  cron text null,
-  start_at timestamptz null,
-  end_at timestamptz null,
-  tz text not null default 'UTC',
-  tag text null,
+  schedule jsonb null,
+  tag text not null,
   title text not null default '',
   body text not null default '',
   url text null,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  check(length(btrim(tag))>0),
+  check(schedule is null or jsonb_typeof(schedule)='object')
 );
-create index if not exists reminders_task_idx on api.reminders(task_id);
-create index if not exists reminders_enabled_idx on api.reminders(enabled) where enabled;
+create index reminders_enabled_idx on api.reminders(enabled) where enabled;
 
 create or replace function api.tg_reminders_touch() returns trigger language plpgsql as $$
 begin new.updated_at:=now(); return new; end $$;
 drop trigger if exists t_reminders_touch on api.reminders;
 create trigger t_reminders_touch before update on api.reminders for each row execute function api.tg_reminders_touch();
 
-create table if not exists api.reminder_outbox(
+create table api.temporal_outbox(
   id bigint generated always as identity primary key,
   op text not null check (op in ('sync','delete')),
-  reminder_id bigint not null,
+  sid text not null,
+  schedule jsonb null,
   available_at timestamptz not null default now(),
   attempts int not null default 0,
   last_error text null,
   processed_at timestamptz null
 );
-create index if not exists reminder_outbox_ready_idx on api.reminder_outbox(available_at,id) where processed_at is null;
-revoke all on api.reminder_outbox from anon;
-revoke all on api.reminder_outbox from public;
+create index temporal_outbox_ready_idx on api.temporal_outbox(available_at,id) where processed_at is null;
+revoke all on api.temporal_outbox from public;
 
-create or replace function api._outbox_insert(_op text,_reminder_id bigint) returns void
-language sql security definer
-set search_path=api,public
-as $$
-  insert into api.reminder_outbox(op,reminder_id) values(_op,_reminder_id);
+create table api.temporal_inbox(
+  id bigint generated always as identity primary key,
+  kind text not null check (kind in ('fire_reminder','set_task_due')),
+  payload jsonb not null,
+  created_at timestamptz not null default now(),
+  processed_at timestamptz null
+);
+create index temporal_inbox_unprocessed_idx on api.temporal_inbox(id) where processed_at is null;
+revoke all on api.temporal_inbox from public;
+
+create or replace function api._temporal_outbox(_op text,_sid text,_schedule jsonb default null) returns void
+language sql security definer set search_path=api,public as $$
+  insert into api.temporal_outbox(op,sid,schedule) values($1,$2,$3);
 $$;
-grant execute on function api._outbox_insert(text,bigint) to anon;
-alter function api._outbox_insert(text,bigint) owner to postgres;
+alter function api._temporal_outbox(text,text,jsonb) owner to postgres;
 
-create or replace function api.tg_reminders_outbox() returns trigger language plpgsql as $$
+create or replace function api.tg_tasks_temporal_complete() returns trigger language plpgsql as $$
+begin
+  if (not old.done) and new.done and new.schedule is not null then
+    new.done:=false;
+    new.last_completed_at:=now();
+    perform api._temporal_outbox('sync','taskroll-'||new.id,new.schedule);
+  end if;
+  return new;
+end $$;
+drop trigger if exists t_tasks_temporal_complete on api.tasks;
+create trigger t_tasks_temporal_complete before update on api.tasks
+for each row execute function api.tg_tasks_temporal_complete();
+
+create or replace function api.tg_tasks_temporal() returns trigger language plpgsql as $$
 begin
   if tg_op='DELETE' then
-    perform api._outbox_insert('delete',old.id);
+    perform api._temporal_outbox('delete','taskroll-'||old.id,null);
     return old;
   end if;
-  perform api._outbox_insert('sync',new.id);
-  return new;
-end $$;
-
-drop trigger if exists t_reminders_outbox on api.reminders;
-create trigger t_reminders_outbox
-after insert or update or delete on api.reminders
-for each row execute function api.tg_reminders_outbox();
-
-create or replace function api.tg_tasks_outbox_for_task_due_reminders()
-returns trigger language plpgsql as $$
-declare rid bigint;
-begin
-  if tg_op<>'UPDATE' then return new; end if;
-  if (new.due_date is not distinct from old.due_date)
-     and (new.done is not distinct from old.done) then
+  if tg_op='INSERT' then
+    if new.schedule is not null then perform api._temporal_outbox('sync','taskroll-'||new.id,new.schedule); end if;
     return new;
   end if;
-  for rid in
-    select r.id from api.reminders r
-    where r.task_id=new.id and r.kind='task_due_before'
-  loop
-    perform api._outbox_insert('sync',rid);
-  end loop;
+  if new.schedule is distinct from old.schedule then
+    if new.schedule is null then perform api._temporal_outbox('delete','taskroll-'||new.id,null);
+    else perform api._temporal_outbox('sync','taskroll-'||new.id,new.schedule); end if;
+  end if;
   return new;
 end $$;
+drop trigger if exists t_tasks_temporal on api.tasks;
+create trigger t_tasks_temporal after insert or update or delete on api.tasks
+for each row execute function api.tg_tasks_temporal();
 
-drop trigger if exists t_tasks_outbox_for_task_due_reminders on api.tasks;
-create trigger t_tasks_outbox_for_task_due_reminders
-after update on api.tasks
-for each row execute function api.tg_tasks_outbox_for_task_due_reminders();
-
-grant select,insert,update,delete on api.reminders to anon;
+create or replace function api.tg_reminders_temporal() returns trigger language plpgsql as $$
+begin
+  if tg_op='DELETE' then
+    perform api._temporal_outbox('delete','reminder-'||old.id,null);
+    return old;
+  end if;
+  if new.enabled and new.schedule is not null then
+    perform api._temporal_outbox('sync','reminder-'||new.id,new.schedule);
+  else
+    perform api._temporal_outbox('delete','reminder-'||new.id,null);
+  end if;
+  return new;
+end $$;
+drop trigger if exists t_reminders_temporal on api.reminders;
+create trigger t_reminders_temporal after insert or update or delete on api.reminders
+for each row execute function api.tg_reminders_temporal();
 
 create or replace function api.fire_reminder(_reminder_id bigint) returns void language plpgsql as $$
-declare r api.reminders; t api.tasks; tg text;
+declare r api.reminders;
 begin
   select * into r from api.reminders where id=_reminder_id;
   if not found or not r.enabled then return; end if;
-
-  if r.task_id is not null then
-    select * into t from api.tasks where id=r.task_id;
-    if not found then return; end if;
-    if t.done or t.due_date is null then return; end if;
-    foreach tg in array coalesce(t.tags,'{}'::text[]) loop
-      perform api._webhook_notify(tg,'Reminder: '||t.title,format('Reminder for "%s" due %s',t.title,t.due_date::text),'info',r.url);
-    end loop;
-    return;
-  end if;
-
-  if r.tag is null or length(btrim(r.tag))=0 then return; end if;
   perform api._webhook_notify(r.tag,coalesce(nullif(r.title,''),'Reminder'),r.body,'info',r.url);
 end $$;
 
-grant execute on function api.fire_reminder(bigint) to anon;
+create or replace function api.tg_temporal_inbox_process() returns trigger language plpgsql as $$
+declare rid bigint; tid bigint; dd timestamptz;
+begin
+  if new.kind='fire_reminder' then
+    rid:=(new.payload->>'reminder_id')::bigint;
+    if rid is not null then perform api.fire_reminder(rid); end if;
+  elsif new.kind='set_task_due' then
+    tid:=(new.payload->>'task_id')::bigint;
+    dd:=(new.payload->>'due_date')::timestamptz;
+    if tid is not null then update api.tasks set due_date=dd where id=tid; end if;
+  end if;
+  update api.temporal_inbox set processed_at=now() where id=new.id;
+  return new;
+end $$;
+drop trigger if exists t_temporal_inbox_process on api.temporal_inbox;
+create trigger t_temporal_inbox_process after insert on api.temporal_inbox
+for each row execute function api.tg_temporal_inbox_process();
+
+grant usage on schema api to anon;
+grant select,insert,update,delete on all tables in schema api to anon;
+grant usage,select on all sequences in schema api to anon;
+grant execute on all functions in schema api to anon;

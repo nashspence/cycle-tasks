@@ -29,18 +29,6 @@ const toLocal = (iso) => {
 };
 const dt = (iso) => (iso ? new Date(iso).toLocaleString() : "");
 const j = (v) => (v == null ? "" : JSON.stringify(v));
-const pgIntSec = (s) => {
-  s = String(s ?? "").trim();
-  if (!s) return 0;
-  let sign = 1;
-  if (s[0] === "-") sign = -1, s = s.slice(1).trim();
-  let days = 0;
-  const dm = s.match(/(-?\d+)\s+day/);
-  if (dm) days = +dm[1] || 0;
-  const tm = s.match(/(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d+))?/);
-  const h = tm ? +tm[1] : 0, m = tm ? +tm[2] : 0, se = tm ? +tm[3] : 0;
-  return sign * (days * 86400 + h * 3600 + m * 60 + se);
-};
 
 const readBody = (req) =>
   new Promise((ok) => {
@@ -127,8 +115,7 @@ const listUrl = (r) => {
 
 const remListUrl = (r) => {
   const q = new URLSearchParams({ select: "*" });
-  q.set("task_id", "is.null");
-  if (r.q.trim()) q.set("or", `(tag.ilike.*${r.q}*,title.ilike.*${r.q}*,body.ilike.*${r.q}*,cron.ilike.*${r.q}*)`);
+  if (r.q.trim()) q.set("or", `(tag.ilike.*${r.q}*,title.ilike.*${r.q}*,body.ilike.*${r.q}*)`);
   q.set("order", `created_at.desc`);
   q.set("offset", String((r.p - 1) * r.limit));
   q.set("limit", String(r.limit + 1));
@@ -165,11 +152,9 @@ addEventListener("drop",async e=>{
   e.preventDefault();
   const back=location.search?"/"+location.search:"/?page=home";
   const p=t.classList.contains("up")
-    ?{a:"move",task_id:+did,new_parent_id:t.dataset.parent==="null"?null:+t.dataset.parent,
-      new_position:${MAXPOS},back}
+    ?{a:"move",task_id:+did,new_parent_id:t.dataset.parent==="null"?null:+t.dataset.parent,new_position:${MAXPOS},back}
     :{a:"move",task_id:+did,new_parent_id:+t.dataset.id,new_position:${MAXPOS},back};
-  await fetch("/a",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify(p)}).catch(()=>{});
+  await fetch("/a",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(p)}).catch(()=>{});
   location.href=back;
 });
 let rt,ch=()=>ch??=(s=>{s=document.createElement("span");s.textContent="0";s.style.cssText="position:absolute;visibility:hidden;font:inherit";document.body.append(s);const w=s.getBoundingClientRect().width;s.remove();return w})();
@@ -177,22 +162,25 @@ const upd=()=>{const cw=12*ch();document.querySelectorAll("table").forEach(t=>{c
 addEventListener("resize",()=>{clearTimeout(rt);rt=setTimeout(upd,50)});addEventListener("DOMContentLoaded",upd);
 
 const tz=()=>Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";
-addEventListener("DOMContentLoaded",()=>document.querySelectorAll("input[name=tz],input[name=roll_tz]").forEach(i=>{if(!i.value)i.value=tz()}));
+addEventListener("DOMContentLoaded",()=>document.querySelectorAll("input[name=stz]").forEach(i=>{if(!i.value)i.value=tz()}));
 
-const rollKindVis=f=>{
-  const k=(f.roll_kind?.value||"interval").toLowerCase();
-  f.querySelectorAll("[data-rollk]").forEach(x=>x.hidden=x.dataset.rollk!==k);
+const skVis=f=>{
+  const k=(f.skind?.value||"interval").toLowerCase();
+  f.querySelectorAll("[data-skind]").forEach(x=>x.hidden=x.dataset.skind!==k);
+  f.querySelectorAll("[data-nonshot]").forEach(x=>x.hidden=k==="one_shot");
 };
-const rollVis=f=>{
-  const b=f.querySelector("[data-rollbox]"); if(b) b.hidden=!f.roll?.checked;
-  if(f.roll?.checked) rollKindVis(f);
+const sOn=f=>{
+  const b=f.querySelector("[data-sbox]");
+  if(!b) return skVis(f);
+  b.hidden=!f.sched_on?.checked;
+  if(!b.hidden) skVis(f);
 };
 addEventListener("change",e=>{
   const f=e.target.closest("form"); if(!f) return;
-  if(e.target.name==="roll") rollVis(f);
-  if(e.target.name==="roll_kind") rollKindVis(f);
+  if(e.target.name==="sched_on") sOn(f);
+  if(e.target.name==="skind") skVis(f);
 });
-addEventListener("DOMContentLoaded",()=>document.querySelectorAll("form").forEach(rollVis));
+addEventListener("DOMContentLoaded",()=>document.querySelectorAll("form").forEach(sOn));
 </script>${body}`;
 
 const nav = (u) =>
@@ -245,19 +233,17 @@ const moveBtn = (u, taskId, pid, pos, lab) =>
 const row = (u, r, t) => {
   const on = colSet(r), ar = r.reorder && r.sort === "position";
   const pid = t.parent_id == null ? "null" : String(t.parent_id);
-  const pending = !!t.due_date_pending, done = pending || t.done;
-  const dueTxt = pending ? "checking next due date…" : dt(t.due_date);
   return html`<tr draggable=true data-id="${t.id}" data-parent="${pid}">
     ${on.has("done") ? html`<td><form class=i method=post action=/a>
       <input type=hidden name=a value=toggle>
       <input type=hidden name=back value="${esc(u.search)}">
       <input type=hidden name=id value="${t.id}">
-      <input type=checkbox name=done value=1 ${done ? "checked" : ""} ${pending ? "disabled" : ""} data-as>
+      <input type=checkbox name=done value=1 ${t.done ? "checked" : ""} data-as>
     </form></td>` : ""}
     ${on.has("position") ? html`<td>${esc(t.position ?? "")}</td>` : ""}
     ${on.has("title") ? html`<td>${ar ? moveBtn(u, t.id, pid, (t.position | 0) - 1, "↑") + moveBtn(u, t.id, pid, (t.position | 0) + 2, "↓") : ""
       }<a href="${href(u, { page: "task", id: t.id })}">${esc(t.title || "(untitled)")}</a></td>` : ""}
-    ${on.has("due") ? html`<td>${esc(dueTxt)}</td>` : ""}
+    ${on.has("due") ? html`<td>${esc(dt(t.due_date))}</td>` : ""}
     ${on.has("tags") ? html`<td>${esc((t.tags || []).join(" "))}</td>` : ""}
     ${on.has("created") ? html`<td>${esc(dt(t.created_at))}</td>` : ""}
   </tr>`;
@@ -265,59 +251,128 @@ const row = (u, r, t) => {
 
 const bestInt = (sec) => {
   sec = +sec || 0;
-  const t = [[604800,"weeks"],[86400,"days"],[3600,"hours"],[60,"minutes"],[1,"seconds"]];
-  for (const [m,u] of t) if (sec % m === 0) return [sec / m, u];
+  const t = [[604800, "weeks"], [86400, "days"], [3600, "hours"], [60, "minutes"], [1, "seconds"]];
+  for (const [m, u] of t) if (sec % m === 0) return [sec / m, u];
   return [sec, "seconds"];
 };
 
-const rollUi = (t) => {
-  const s = t?.roll_spec || null;
-  const k = (s?.kind || "cron");
-  const [n0,u0] = k==="interval" ? bestInt(s?.every_seconds) : [1,"days"];
-  const cal = k==="calendar" ? (s?.calendars?.[0] || {}) : {};
-  const hh = (cal.hour?.[0] ?? 9), mm = (cal.minute?.[0] ?? 0);
-  const p2 = (x) => String(+x||0).padStart(2,"0");
-  const dow = new Set((cal.day_of_week || []).map((x)=>+x));
-  return html`
-  <label><input type=checkbox name=roll value=1 ${t?.roll ? "checked" : ""}> auto-advance</label><br>
-  <div data-rollbox ${t?.roll ? "" : "hidden"}>
-    <label>Time zone <input name=roll_tz value="${esc(t?.roll_tz || "")}" placeholder="(auto)"></label><br>
-    <label>Kind <select name=roll_kind>
-      ${["interval","cron","calendar"].map((x)=>`<option value="${x}" ${k===x?"selected":""}>${x}</option>`).join("")}
-    </select></label><br>
-
-    <div data-rollk=interval>
-      <label>Every <input name=roll_n type=number min=1 value="${esc(n0)}"></label>
-      <select name=roll_u>${["seconds","minutes","hours","days","weeks"].map(x=>`<option value="${x}" ${u0===x?"selected":""}>${x}</option>`).join("")}</select>
-    </div><br>
-
-    <div data-rollk=cron>
-      <label>Cron <input name=roll_cron placeholder="0 9 * * MON" value="${esc(k==="cron" ? (s?.cron||"") : "")}"></label>
-    </div><br>
-
-    <div data-rollk=calendar>
-      <label>Time <input name=roll_time type=time value="${esc(p2(hh)+":"+p2(mm))}"></label>
-      Days:
-      ${[[1,"Mon"],[2,"Tue"],[3,"Wed"],[4,"Thu"],[5,"Fri"],[6,"Sat"],[7,"Sun"]].map(([v,l])=>
-        `<label><input type=checkbox name=roll_dow value="${v}" ${dow.has(v)?"checked":""}>${l}</label>`
-      ).join(" ")}
-    </div>
-  </div>`;
+const schedKind = (s) => {
+  s = s || {};
+  if (Array.isArray(s.cron_expressions) && s.cron_expressions.length) return "cron";
+  if (Array.isArray(s.intervals) && s.intervals.length) return "interval";
+  if (Array.isArray(s.calendars) && s.calendars.length) {
+    const y = s.calendars[0]?.year;
+    return Array.isArray(y) && y.length ? "one_shot" : "calendar";
+  }
+  return "interval";
 };
 
-const rollSpecFrom = (b) => {
-  const kind = String(b.roll_kind || "interval");
-  const tz = String(b.roll_tz || "UTC").trim() || "UTC";
-  if (kind === "interval") {
-    const n = Math.max(1, +b.roll_n || 1);
-    const u = String(b.roll_u || "days");
-    const m = { seconds:1, minutes:60, hours:3600, days:86400, weeks:604800 }[u] || 86400;
-    return { tz, spec: { kind, every_seconds: n * m } };
+const schedUi = (s, { oneShot } = {}) => {
+  s = s || {};
+  const k = oneShot ? schedKind(s) : (schedKind(s) === "one_shot" ? "calendar" : schedKind(s));
+  const tz = s.time_zone_name || "";
+  const cal = s.calendars?.[0] || {};
+  const g0 = (kk, d) => +((cal[kk] || [])[0]?.start ?? d);
+  const hh = g0("hour", 9), mm = g0("minute", 0), ss = g0("second", 0);
+  const p2 = (x) => String(+x || 0).padStart(2, "0");
+  const dows = cal.day_of_week || [];
+  const allD = dows.length === 1 && +dows[0].start === 0 && +dows[0].end === 6;
+  const dow = new Set(allD ? [0, 1, 2, 3, 4, 5, 6] : dows.map((r) => +r.start).filter((x) => x >= 0 && x <= 6));
+  const [n0, u0] = Array.isArray(s.intervals) && s.intervals.length ? bestInt(+s.intervals[0]?.every_seconds || 86400) : [1, "days"];
+  const at = k === "one_shot"
+    ? `${g0("year", new Date().getFullYear())}-${p2(g0("month", 1))}-${p2(g0("day_of_month", 1))}T${p2(hh)}:${p2(mm)}`
+    : "";
+
+  return html`
+    <label>Time zone <input name=stz value="${esc(tz)}" placeholder="(auto)"></label><br>
+    <label>Kind <select name=skind>
+      ${[
+        oneShot && ["one_shot", "one-shot"],
+        ["interval", "interval"],
+        ["cron", "cron"],
+        ["calendar", "calendar"],
+      ].filter(Boolean).map(([v, t]) => `<option value="${v}" ${k === v ? "selected" : ""}>${t}</option>`).join("")}
+    </select></label><br>
+
+    <div data-skind=one_shot>
+      <label>At <input type=datetime-local name=sat value="${esc(at)}"></label>
+    </div>
+
+    <div data-skind=interval>
+      <label>Every <input name=sn type=number min=1 value="${esc(n0)}"></label>
+      <select name=su>${["seconds", "minutes", "hours", "days", "weeks"].map((x) => `<option value="${x}" ${u0 === x ? "selected" : ""}>${x}</option>`).join("")}</select>
+    </div>
+
+    <div data-skind=cron>
+      <label>Cron <input name=scron placeholder="0 9 * * 1-5" value="${esc((s.cron_expressions || [])[0] || "")}"></label>
+    </div>
+
+    <div data-skind=calendar>
+      <label>Time <input name=stime type=time value="${esc(p2(hh) + ":" + p2(mm))}"></label>
+      Days:
+      ${[
+        [0, "Sun"], [1, "Mon"], [2, "Tue"], [3, "Wed"], [4, "Thu"], [5, "Fri"], [6, "Sat"],
+      ].map(([v, l]) => `<label><input type=checkbox name=sdow value="${v}" ${dow.has(v) ? "checked" : ""}>${l}</label>`).join(" ")}
+    </div>
+
+    <div data-nonshot>
+      <label>Start <input type=datetime-local name=sstart value="${esc(s.start_at ? toLocal(s.start_at) : "")}"></label><br>
+      <label>End <input type=datetime-local name=send value="${esc(s.end_at ? toLocal(s.end_at) : "")}"></label>
+    </div>`;
+};
+
+const r1 = (n) => [{ start: n, end: n, step: 1 }];
+const rAll = (a, b) => [{ start: a, end: b, step: 1 }];
+
+const schedFrom = (b, { oneShot } = {}) => {
+  const tz = String(b.stz || "").trim();
+  const k = String(b.skind || "interval").toLowerCase();
+  const out = { time_zone_name: tz || "UTC" };
+  const sa = toUtcISO(b.sstart), ea = toUtcISO(b.send);
+  if (sa) out.start_at = sa;
+  if (ea) out.end_at = ea;
+
+  if (oneShot && k === "one_shot") {
+    delete out.start_at; delete out.end_at;
+    const d = new Date(String(b.sat || ""));
+    if (isNaN(d)) throw new Error("Reminder: invalid time");
+    out.calendars = [{
+      second: r1(d.getSeconds() || 0),
+      minute: r1(d.getMinutes() || 0),
+      hour: r1(d.getHours() || 0),
+      day_of_month: r1(d.getDate()),
+      month: r1(d.getMonth() + 1),
+      day_of_week: r1(d.getDay()),
+      year: r1(d.getFullYear()),
+    }];
+    return out;
   }
-  if (kind === "cron") return { tz, spec: { kind, cron: String(b.roll_cron || "").trim() } };
-  const t = String(b.roll_time || "09:00").split(":"), hh = +t[0] || 9, mm = +t[1] || 0;
-  const d = [].concat(b.roll_dow || []).map((x) => +x).filter((x) => x >= 1 && x <= 7);
-  return { tz, spec: { kind: "calendar", calendars: [{ day_of_week: d, hour: [hh], minute: [mm], second: [0] }] } };
+
+  if (k === "interval") {
+    const n = Math.max(1, +b.sn || 1);
+    const u = String(b.su || "days");
+    const m = { seconds: 1, minutes: 60, hours: 3600, days: 86400, weeks: 604800 }[u] || 86400;
+    out.intervals = [{ every_seconds: n * m }];
+    return out;
+  }
+
+  if (k === "cron") {
+    out.cron_expressions = [String(b.scron || "").trim()].filter(Boolean);
+    return out;
+  }
+
+  const t = String(b.stime || "09:00").split(":"), hh = +t[0] || 9, mm = +t[1] || 0;
+  const d0 = [].concat(b.sdow || []).map((x) => +x).filter((x) => x >= 0 && x <= 6);
+  const d = d0.length ? d0 : [0, 1, 2, 3, 4, 5, 6];
+  out.calendars = [{
+    second: r1(0),
+    minute: r1(mm),
+    hour: r1(hh),
+    day_of_month: rAll(1, 31),
+    month: rAll(1, 12),
+    day_of_week: r1(d[0]).concat(d.slice(1).map((x) => ({ start: x, end: x, step: 1 }))),
+  }];
+  return out;
 };
 
 async function render(req, res) {
@@ -339,12 +394,8 @@ async function render(req, res) {
       more = list.length > r.limit;
       list = list.slice(0, r.limit);
     }));
-    if (needTask) jobs.push(api(
-      `/reminders?task_id=eq.${r.id}&kind=eq.task_due_before&order=created_at.asc`
-    ).then((x) => (rem = Array.isArray(x) ? x : [])));
-    if (needTask) jobs.push(api(
-      `/task_history?task_id=eq.${r.id}&order=created_at.desc`
-    ).then((x) => (history = Array.isArray(x) ? x : [])));
+    if (needTask) jobs.push(api(`/task_history?task_id=eq.${r.id}&order=created_at.desc`)
+      .then((x) => (history = Array.isArray(x) ? x : [])));
 
     if (r.page === "reminders") jobs.push(api(remListUrl(r)).then((x) => {
       rlist = Array.isArray(x) ? x : [];
@@ -393,8 +444,7 @@ async function render(req, res) {
              <h1>${esc(task?.title || `Task #${r.id}`)}</h1>
              <div>
                <a href="${href(u, { page: "edit", id: r.id })}">Edit</a> |
-               <a href="${href(u, { page: "move", id: r.id })}">Move</a> |
-               <a href="${href(u, { page: "trem", id: r.id })}">Reminder</a>
+               <a href="${href(u, { page: "move", id: r.id })}">Move</a>
              </div>
              <div>${esc(task?.description || "")}</div>`
           : html`<h1>Tasks</h1>`;
@@ -402,15 +452,6 @@ async function render(req, res) {
         const newHref = href(u, r.page === "task"
           ? { page: "new", parent: r.id }
           : { page: "new", parent: "null" });
-
-        const remHtml = r.page === "task"
-          ? html`<h2>Reminders</h2><ul>${rem.map((x) => {
-            const due = task?.due_date ? new Date(task.due_date) : null;
-            const sec = pgIntSec(x.before);
-            const fire = due ? new Date(due.getTime() - sec * 1000).toISOString() : "";
-            return html`<li>${esc(dt(fire))} — ${esc(String(x.before || ""))}${x.enabled === false ? " (off)" : ""}</li>`;
-          }).join("") || html`<li>None</li>`}</ul>`
-          : "";
 
         const hist = history.length
           ? history.map((h) => html`<tr>
@@ -420,7 +461,8 @@ async function render(req, res) {
               <td>${esc(j(h.new_values))}</td>
             </tr>`).join("")
           : "<tr><td colspan=4>None</td></tr>";
-        return html`${nav(u)}${hdr}${remHtml}
+
+        return html`${nav(u)}${hdr}
           <div><a href="${newHref}">+ New</a></div>
           ${filters(u, r)}
           <table>${head}<tbody>${list.map((t) => row(u, r, t)).join("")}</tbody></table>
@@ -433,9 +475,7 @@ async function render(req, res) {
       }
 
       if (r.page === "new") {
-        const back = r.parent == null
-          ? href(u, { page: "home", id: null })
-          : href(u, { page: "task", id: r.parent });
+        const back = r.parent == null ? href(u, { page: "home", id: null }) : href(u, { page: "task", id: r.parent });
         const defAlert = new URL(href(u, { page: "task", id: "" }), u).toString();
         return html`${nav(u)}<a href="${back}">← Back</a><h1>New</h1>
           <form method=post action=/a>
@@ -448,7 +488,8 @@ async function render(req, res) {
             <label>Tags <input name=tags></label><br>
             <label>Change alert URL <input name=alert_url value="${esc(defAlert)}"></label><br>
             <label>Due <input type=datetime-local name=due></label><br>
-            ${rollUi(null)}
+            <label><input type=checkbox name=sched_on value=1> auto-advance</label><br>
+            <div data-sbox hidden>${schedUi(null, { oneShot: false })}</div><br>
             <button>Create</button>
           </form>`;
       }
@@ -466,7 +507,8 @@ async function render(req, res) {
             <label>Tags <input name=tags value="${esc((task?.tags || []).join(" "))}"></label><br>
             <label>Change alert URL <input name=alert_url value="${esc(task?.alert_url || defAlert)}"></label><br>
             <label>Due <input type=datetime-local name=due value="${esc(task?.due_date ? toLocal(task.due_date) : "")}"></label><br>
-            ${rollUi(task)}
+            <label><input type=checkbox name=sched_on value=1 ${task?.schedule ? "checked" : ""}> auto-advance</label><br>
+            <div data-sbox ${task?.schedule ? "" : "hidden"}>${schedUi(task?.schedule, { oneShot: false })}</div><br>
             <button>Save</button>
             <input type=hidden name=trashed value="${task?.trashed ? "0" : "1"}">
             <button name=a value=delete>${task?.trashed ? "Restore" : "Trash"}</button>
@@ -485,19 +527,6 @@ async function render(req, res) {
           </form>`;
       }
 
-      if (r.page === "trem") {
-        const defUrl = new URL(href(u, { page: "task", id: r.id }), u).toString();
-        return html`${nav(u)}<a href="${href(u, { page: "task", id: r.id })}">← Back</a><h1>Reminder</h1>
-          <form method=post action=/a>
-            <input type=hidden name=a value=trel>
-            <input type=hidden name=task_id value="${esc(r.id)}">
-            <input type=hidden name=back value="${esc(href(u, { page: "task", id: r.id }))}">
-            <label>Before <input name=before required placeholder="e.g. 30 minutes"></label>
-            <label>URL <input name=url value="${esc(defUrl)}"></label>
-            <button ${task?.due_date ? "" : "disabled"}>Save</button>
-          </form>`;
-      }
-
       if (r.page === "reminders") {
         return html`${nav(u)}<h1>Reminders</h1>
           <form method=get>
@@ -506,9 +535,10 @@ async function render(req, res) {
           </form>
           <div><a href="${href(u, { page: "rem", id: null, p: 1 })}">+ New</a></div>
           <table>
-            <thead><tr><th>On</th><th>ID</th><th>Kind</th><th>When</th><th>TZ</th><th>Tag</th><th>Title</th><th></th></tr></thead>
+            <thead><tr><th>On</th><th>ID</th><th>Kind</th><th>TZ</th><th>Title</th><th></th></tr></thead>
             <tbody>${rlist.map((x) => {
-              const when = x.kind === "one_off" ? dt(x.at) : x.kind === "interval" ? String(x.every || "") : String(x.cron || "");
+              const sk = schedKind(x.schedule);
+              const tz = x.schedule?.time_zone_name || "UTC";
               return html`<tr>
                 <td><form class=i method=post action=/a>
                   <input type=hidden name=a value=rtoggle>
@@ -517,10 +547,8 @@ async function render(req, res) {
                   <input type=checkbox name=enabled value=1 ${x.enabled ? "checked" : ""} data-as>
                 </form></td>
                 <td><a href="${href(u, { page: "rem", id: x.id })}">${esc(x.id)}</a></td>
-                <td>${esc(x.kind)}</td>
-                <td>${esc(when)}</td>
-                <td>${esc(x.tz || "UTC")}</td>
-                <td>${esc(x.tag || "")}</td>
+                <td>${esc(sk)}</td>
+                <td>${esc(tz)}</td>
                 <td>${esc(x.title || "")}</td>
                 <td><form class=i method=post action=/a>
                   <input type=hidden name=a value=rdel>
@@ -535,7 +563,6 @@ async function render(req, res) {
       }
 
       if (r.page === "rem") {
-        const k = one?.kind || "one_off";
         const back = href(u, { page: "reminders", id: null });
         return html`${nav(u)}<a href="${back}">← Back</a><h1>${one ? `Reminder #${one.id}` : "New Reminder"}</h1>
           <form method=post action=/a>
@@ -543,16 +570,7 @@ async function render(req, res) {
             <input type=hidden name=id value="${esc(one?.id ?? "")}">
             <input type=hidden name=back value="${esc(back)}">
             <label>Enabled <input type=checkbox name=enabled value=1 ${one?.enabled === false ? "" : "checked"}></label><br>
-            <label>Kind <select name=kind>
-              ${["one_off", "interval", "cron"].map((x) =>
-                `<option value="${x}" ${k === x ? "selected" : ""}>${x}</option>`).join("")}
-            </select></label><br>
-            <label>At <input type=datetime-local name=at value="${esc(one?.at ? toLocal(one.at) : "")}"></label><br>
-            <label>Every <input name=every value="${esc(one?.every ?? "")}" placeholder="e.g. 15 minutes"></label><br>
-            <label>Cron <input name=cron value="${esc(one?.cron ?? "")}" placeholder="e.g. 0 9 * * 1-5"></label><br>
-            <label>Start <input type=datetime-local name=start_at value="${esc(one?.start_at ? toLocal(one.start_at) : "")}"></label><br>
-            <label>End <input type=datetime-local name=end_at value="${esc(one?.end_at ? toLocal(one.end_at) : "")}"></label><br>
-            <label>TZ <input name=tz value="${esc(one?.tz || "")}" placeholder="(auto)"></label><br>
+            ${schedUi(one?.schedule, { oneShot: true })}<br>
             <label>Tag <input name=tag value="${esc(one?.tag ?? "")}"></label><br>
             <label>Title <input name=title value="${esc(one?.title ?? "")}"></label><br>
             <label>Body <textarea name=body rows=6>${esc(one?.body ?? "")}</textarea></label><br>
@@ -671,7 +689,6 @@ async function act(req, res) {
       const title = String(b.title || "").trim();
       if (!title) throw new Error("Title required");
 
-      const roll = b.roll === "1" || b.roll === "on";
       const alertUrl = String(b.alert_url || "").trim();
       const send = {
         title,
@@ -679,18 +696,8 @@ async function act(req, res) {
         tags: tagsFrom(b.tags),
         due_date: toUtcISO(b.due),
         alert_url: alertUrl || null,
-        roll,
-        roll_tz: null,
-        roll_spec: null,
+        schedule: (b.sched_on === "1" || b.sched_on === "on") ? schedFrom(b, { oneShot: false }) : null,
       };
-      if (roll) {
-        const { tz, spec } = rollSpecFrom(b);
-        if (!spec || typeof spec !== "object") throw new Error("Auto-advance: invalid roll spec");
-        send.roll_tz = tz;
-        send.roll_spec = spec;
-      } else {
-        send.roll_tz = String(b.roll_tz || "UTC").trim() || "UTC";
-      }
 
       if (b.mode === "new") {
         const created = await api("/rpc/append_task", {
@@ -708,24 +715,16 @@ async function act(req, res) {
         const id = created?.id ?? created?.[0]?.id;
         if (id) await api(`/tasks?id=eq.${+id}`, {
           method: "PATCH", headers: H,
-          body: JSON.stringify({ roll: send.roll, roll_tz: send.roll_tz, roll_spec: send.roll_spec, alert_url: alertUrl || taskUrl(req, +id) }),
+          body: JSON.stringify({ schedule: send.schedule, alert_url: alertUrl || taskUrl(req, +id) }),
         });
       } else await api(`/tasks?id=eq.${+b.id}`, {
-        method: "PATCH", headers: H, body: JSON.stringify({ ...send, alert_url: alertUrl || taskUrl(req, +b.id) }),
+        method: "PATCH", headers: H,
+        body: JSON.stringify({ ...send, alert_url: alertUrl || taskUrl(req, +b.id) }),
       });
     }
 
-    if (a === "delete") await api(`/tasks?id=eq.${+b.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ trashed: String(b.trashed ?? "1") !== "0" }) });
-
-    if (a === "trel") await api("/reminders", {
-      method: "POST", headers: H,
-      body: JSON.stringify({
-        kind: "task_due_before",
-        enabled: true,
-        task_id: +b.task_id,
-        before: String(b.before || "").trim(),
-        url: String(b.url || "").trim() || null,
-      }),
+    if (a === "delete") await api(`/tasks?id=eq.${+b.id}`, {
+      method: "PATCH", headers: H, body: JSON.stringify({ trashed: String(b.trashed ?? "1") !== "0" }),
     });
 
     if (a === "rtoggle") await api(`/reminders?id=eq.${+b.id}`, {
@@ -736,32 +735,16 @@ async function act(req, res) {
     if (a === "rdel") await api(`/reminders?id=eq.${+b.id}`, { method: "DELETE" });
 
     if (a === "rsave") {
-      const kind = String(b.kind || "one_off");
       const send = {
         enabled: b.enabled === "1" || b.enabled === "on",
-        kind,
-        task_id: null,
-        at: toUtcISO(b.at),
-        every: String(b.every || "").trim() || null,
-        cron: String(b.cron || "").trim() || null,
-        start_at: toUtcISO(b.start_at),
-        end_at: toUtcISO(b.end_at),
-        tz: String(b.tz || "UTC").trim() || "UTC",
+        schedule: schedFrom(b, { oneShot: true }),
         tag: String(b.tag || "").trim() || null,
         title: String(b.title || "").trim(),
         body: String(b.body || ""),
         url: String(b.url || "").trim() || null,
       };
-      if (kind !== "one_off") send.at = null;
-      if (kind !== "interval") send.every = null;
-      if (kind !== "cron") send.cron = null;
-
-      if (b.id) await api(`/reminders?id=eq.${+b.id}`, {
-        method: "PATCH", headers: H, body: JSON.stringify(send),
-      });
-      else await api("/reminders", {
-        method: "POST", headers: H, body: JSON.stringify(send),
-      });
+      if (b.id) await api(`/reminders?id=eq.${+b.id}`, { method: "PATCH", headers: H, body: JSON.stringify(send) });
+      else await api("/reminders", { method: "POST", headers: H, body: JSON.stringify(send) });
     }
 
     if (a === "acreate" || a === "aadd") await api("/webhook_targets", {

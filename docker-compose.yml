@@ -71,7 +71,7 @@ services:
       api:
         condition: service_healthy
     environment:
-      API_UPSTREAM: http://api:80/
+      POSTGRES_URI: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/postgres
       TEMPORAL_ADDRESS: scheduler:7233
       TEMPORAL_NAMESPACE: reminders
       TASK_QUEUE: reminders
