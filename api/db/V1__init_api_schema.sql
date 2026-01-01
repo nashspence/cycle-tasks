@@ -156,11 +156,8 @@ create or replace function api._webhook_notify(
 begin
   perform net.http_post(
     url:=u,
-    body:=jsonb_build_object('title',title,'body',body,'type',type)
-      || case
-        when _url is null or length(btrim(_url))=0 then '{}'::jsonb
-        else jsonb_build_object('url',_url)
-      end
+    body:=jsonb_build_object('version','1.0','title',title,'message',body,'attachments','[]'::jsonb,'type',type)
+      || case when _url is null or length(btrim(_url))=0 then '{}'::jsonb else jsonb_build_object('url',_url) end
   )
   from api.webhook_targets t
   cross join lateral unnest(array[t.url]) u
