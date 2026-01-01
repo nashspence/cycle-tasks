@@ -333,7 +333,12 @@ begin
     else
       new.due_pending:=true;
       new.due_date:=null;
-      new.schedule:=jsonb_set(new.schedule,'{start_at}',to_jsonb(coalesce(old.due_date,now())),true);
+      new.schedule := jsonb_set(
+        new.schedule,
+        '{start_at}',
+        to_jsonb(date_trunc('second', coalesce(old.due_date, now())) + interval '1 second'),
+        true
+      );
     end if;
   end if;
   return new;
@@ -359,16 +364,18 @@ begin
     return new;
   end if;
 
-  if new.schedule is distinct from old.schedule then
-    if new.schedule is null or api._is_interval_only(new.schedule) then
-      perform api._temporal_outbox('delete','taskroll-'||new.id,null);
-    else
-      perform api._temporal_outbox('sync','taskroll-'||new.id,new.schedule);
-    end if;
+  -- UPDATE
+  if new.schedule is null or api._is_interval_only(new.schedule) then
+    perform api._temporal_outbox('delete','taskroll-'||new.id,null);
+
+  elsif (new.schedule is distinct from old.schedule)
+        or ((not old.due_pending) and new.due_pending) then
+    perform api._temporal_outbox('sync','taskroll-'||new.id,new.schedule);
   end if;
 
   return new;
 end $$;
+
 
 drop trigger if exists t_tasks_temporal on api.tasks;
 create trigger t_tasks_temporal after insert or update or delete on api.tasks

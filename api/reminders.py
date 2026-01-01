@@ -157,7 +157,7 @@ MARK_OK="update api.temporal_outbox set processed_at=now(),last_error=null where
 MARK_FAIL="update api.temporal_outbox set last_error=$2,available_at=now()+($3::int*interval '1 second') where id=$1;"
 BACKOFF=lambda a:min(300,2**max(0,int(a)-1))
 
-async def _proc(pg,c,row):
+async def _proc(pg, c, row):
   oid,op,sid,sch,att=int(row["id"]),row["op"],row["sid"],row["schedule"],int(row["attempts"])
   try:
     if op=="delete":
@@ -175,15 +175,32 @@ async def _proc(pg,c,row):
     else:
       act=ScheduleActionStartWorkflow(WF_NOOP,args=[],id=sid,task_queue=TASK_QUEUE)
 
-    await _upsert(c,sid,Schedule(action=act,spec=sp,policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)))
+    sch_obj=Schedule(action=act,spec=sp,policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP))
+
+    # taskroll is ephemeral: delete+create to reset Temporal schedule state each sync
+    if sid.startswith("taskroll-"):
+      await _del(c,sid)
+      await c.create_schedule(sid,sch_obj)
+    else:
+      await _upsert(c,sid,sch_obj)
 
     nxt=await _next_time(c,sid)
+
     if sid.startswith("taskroll-") and nxt:
       tid=int(sid.split("-",1)[1])
       await pg.execute(
-        "insert into api.temporal_inbox(kind,payload) values('set_task_due',$1::jsonb)",
-        json.dumps({"task_id":tid,"due_date":nxt.isoformat()})
+        """
+        insert into api.temporal_inbox(kind,payload)
+        select 'set_task_due',$1::jsonb
+        where exists (
+          select 1 from api.tasks
+          where id=$2 and (due_pending or due_date is null)
+        );
+        """,
+        json.dumps({"task_id":tid,"due_date":nxt.isoformat()}),
+        tid,
       )
+      await _del(c,sid)
 
     if nxt is None:
       await _del(c,sid)
@@ -195,6 +212,7 @@ async def _proc(pg,c,row):
     await pg.execute(MARK_OK,oid)
   except Exception as e:
     await pg.execute(MARK_FAIL,oid,str(e),BACKOFF(att))
+
 
 async def run_worker():
   global _TCLIENT
