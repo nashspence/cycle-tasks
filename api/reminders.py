@@ -1,11 +1,8 @@
 import os, json, asyncio, multiprocessing as mp, threading, itertools
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
+from temporal_schedule_input import schedule_from_component_json
 from temporalio import activity, workflow
-from temporalio.client import (
-  Client, Schedule, ScheduleActionStartWorkflow, ScheduleAlreadyRunningError,
-  ScheduleCalendarSpec, ScheduleIntervalSpec, ScheduleOverlapPolicy,
-  SchedulePolicy, ScheduleRange, ScheduleSpec, ScheduleUpdate,
-)
+from temporalio.client import Client, ScheduleAlreadyRunningError, ScheduleUpdate
 
 TASK_QUEUE=os.getenv("TASK_QUEUE","reminders")
 TEMPORAL_ADDRESS=os.getenv("TEMPORAL_ADDRESS","localhost:7233")
@@ -19,35 +16,25 @@ WF_INBOX="temporal_inbox"
 WF_NOOP="noop"
 _TCLIENT=None
 
-def _utc(v):
-  if v is None: return None
-  if isinstance(v,datetime):
-    return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
-  if isinstance(v,str):
-    s=v.replace("Z","+00:00")
-    return datetime.fromisoformat(s).astimezone(timezone.utc)
-  return None
-
-def _rng(xs):
-  return [ScheduleRange(int(x["start"]),None if x.get("end") is None else int(x["end"]),None if x.get("step") is None else int(x["step"])) for x in (xs or [])]
-
-def _cal(d):
-  return ScheduleCalendarSpec(
-    second=_rng(d.get("second")),minute=_rng(d.get("minute")),hour=_rng(d.get("hour")),
-    day_of_week=_rng(d.get("day_of_week")),day_of_month=_rng(d.get("day_of_month")),
-    month=_rng(d.get("month")),year=_rng(d.get("year")),
-  )
-
-def _spec(j):
-  j=j or {}
-  ints=[ScheduleIntervalSpec(every=timedelta(seconds=int(i["every_seconds"])),offset=timedelta(seconds=int(i.get("offset_seconds",0)))) for i in (j.get("intervals") or [])]
-  cals=[_cal(x) for x in (j.get("calendars") or [])]
-  return ScheduleSpec(
-    cron_expressions=j.get("cron_expressions") or [],
-    intervals=ints,calendars=cals,
-    start_at=_utc(j.get("start_at")),end_at=_utc(j.get("end_at")),
-    time_zone_name=j.get("time_zone_name") or "UTC",
-  )
+def _sch(sid,spec,wf,args):
+  s=spec if isinstance(spec,dict) else json.loads(spec or "{}")
+  ints=[]
+  for i in s.get("intervals") or []:
+    ev=i.get("every") or (f"PT{int(i['every_seconds'])}S" if i.get("every_seconds") is not None else None)
+    off=i.get("offset") or (f"PT{int(i['offset_seconds'])}S" if i.get("offset_seconds") else None)
+    if not ev: raise ValueError("interval requires 'every'")
+    ints.append({k:v for k,v in {"every":ev,"offset":off}.items() if v})
+  if ints: s=dict(s,intervals=ints)
+  return schedule_from_component_json({
+    "schedule":{
+      "spec":s,
+      "action":{
+        "type":"startWorkflow","workflow_type":wf,"workflow_id":sid,
+        "task_queue":TASK_QUEUE,"args_json":json.dumps(args),
+      },
+      "policy":{"overlap":"SKIP"},
+    }
+  })
 
 async def _del(c,sid):
   try: await c.get_schedule_handle(sid).delete()
@@ -164,18 +151,11 @@ async def _proc(pg, c, row):
       await _del(c,sid)
       return await pg.execute(MARK_OK,oid)
 
-    sp=_spec(sch if isinstance(sch,dict) else json.loads(sch))
     if sid.startswith("reminder-"):
       rid=int(sid.split("-",1)[1])
-      act=ScheduleActionStartWorkflow(
-        WF_INBOX,
-        args=[{"kind":"fire_reminder","payload":{"reminder_id":rid,"sid":sid}}],
-        id=sid,task_queue=TASK_QUEUE
-      )
+      sch_obj=_sch(sid,sch,WF_INBOX,[{"kind":"fire_reminder","payload":{"reminder_id":rid,"sid":sid}}])
     else:
-      act=ScheduleActionStartWorkflow(WF_NOOP,args=[],id=sid,task_queue=TASK_QUEUE)
-
-    sch_obj=Schedule(action=act,spec=sp,policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP))
+      sch_obj=_sch(sid,sch,WF_NOOP,[])
 
     # taskroll is ephemeral: delete+create to reset Temporal schedule state each sync
     if sid.startswith("taskroll-"):
