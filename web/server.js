@@ -233,6 +233,7 @@ const moveBtn = (u, taskId, pid, pos, lab) =>
 const row = (u, r, t) => {
   const on = colSet(r), ar = r.reorder && r.sort === "position";
   const pid = t.parent_id == null ? "null" : String(t.parent_id);
+  const dueTxt = t.due_pending ? "pending..." : dt(t.due_date); // NEW
   return html`<tr draggable=true data-id="${t.id}" data-parent="${pid}">
     ${on.has("done") ? html`<td><form class=i method=post action=/a>
       <input type=hidden name=a value=toggle>
@@ -243,7 +244,7 @@ const row = (u, r, t) => {
     ${on.has("position") ? html`<td>${esc(t.position ?? "")}</td>` : ""}
     ${on.has("title") ? html`<td>${ar ? moveBtn(u, t.id, pid, (t.position | 0) - 1, "↑") + moveBtn(u, t.id, pid, (t.position | 0) + 2, "↓") : ""
       }<a href="${href(u, { page: "task", id: t.id })}">${esc(t.title || "(untitled)")}</a></td>` : ""}
-    ${on.has("due") ? html`<td>${esc(dt(t.due_date))}</td>` : ""}
+    ${on.has("due") ? html`<td>${esc(dueTxt)}</td>` : ""} <!-- UPDATED -->
     ${on.has("tags") ? html`<td>${esc((t.tags || []).join(" "))}</td>` : ""}
     ${on.has("created") ? html`<td>${esc(dt(t.created_at))}</td>` : ""}
   </tr>`;
@@ -589,13 +590,13 @@ async function render(req, res) {
           <table>
             <thead><tr><th>Tag</th><th>URLs</th><th>Enabled</th><th>Latest</th></tr></thead>
             <tbody>${alerts.map((it) =>
-          html`<tr>
+              html`<tr>
                 <td><a href="${href(u, { page: "alert", atag: it.tag, p: 1 })}">${esc(it.tag)}</a></td>
                 <td>${esc(it.url_count ?? 0)}</td>
                 <td>${esc(it.enabled_count ?? 0)}</td>
                 <td>${esc(dt(it.latest || ""))}</td>
               </tr>`
-        ).join("")}</tbody>
+            ).join("")}</tbody>
           </table>
           ${pager(u, r, alertMore)}
           <h2>Add</h2>
@@ -620,7 +621,7 @@ async function render(req, res) {
           <table>
             <thead><tr><th>On</th><th>URL</th><th>Created</th><th></th></tr></thead>
             <tbody>${aurls.map((x) =>
-          html`<tr>
+              html`<tr>
                 <td><form class=i method=post action=/a>
                   <input type=hidden name=a value=atoggle>
                   <input type=hidden name=tag value="${esc(x.tag)}">
@@ -638,7 +639,7 @@ async function render(req, res) {
                   <button>Delete</button>
                 </form></td>
               </tr>`
-        ).join("")}</tbody>
+            ).join("")}</tbody>
           </table>
           <h2>Add URL</h2>
           <form method=post action=/a>
@@ -690,13 +691,18 @@ async function act(req, res) {
       if (!title) throw new Error("Title required");
 
       const alertUrl = String(b.alert_url || "").trim();
+      const dueISO = toUtcISO(b.due);
+      const schedOn = (b.sched_on === "1" || b.sched_on === "on");
+      const schedule = schedOn ? schedFrom(b, { oneShot: false }) : null;
+
       const send = {
         title,
         description: String(b.description || ""),
         tags: tagsFrom(b.tags),
-        due_date: toUtcISO(b.due),
+        due_date: dueISO,
         alert_url: alertUrl || null,
-        schedule: (b.sched_on === "1" || b.sched_on === "on") ? schedFrom(b, { oneShot: false }) : null,
+        schedule,
+        due_pending: schedOn && !dueISO ? true : false, // NEW: clear pending when user sets due / disables schedule
       };
 
       if (b.mode === "new") {
@@ -715,7 +721,7 @@ async function act(req, res) {
         const id = created?.id ?? created?.[0]?.id;
         if (id) await api(`/tasks?id=eq.${+id}`, {
           method: "PATCH", headers: H,
-          body: JSON.stringify({ schedule: send.schedule, alert_url: alertUrl || taskUrl(req, +id) }),
+          body: JSON.stringify({ schedule: send.schedule, alert_url: alertUrl || taskUrl(req, +id), due_pending: send.due_pending }),
         });
       } else await api(`/tasks?id=eq.${+b.id}`, {
         method: "PATCH", headers: H,

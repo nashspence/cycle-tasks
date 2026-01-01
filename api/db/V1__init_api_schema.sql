@@ -1,4 +1,3 @@
--- schema.sql
 create extension if not exists pg_net;
 drop schema if exists api cascade;
 create schema api;
@@ -10,6 +9,7 @@ create table api.tasks(
   tags text[] null,
   alert_url text null,
   due_date timestamptz null,
+  due_pending boolean not null default false,
   done boolean not null default false,
   trashed boolean not null default false,
   created_at timestamptz not null default now(),
@@ -311,15 +311,34 @@ language sql security definer set search_path=api,public as $$
 $$;
 alter function api._temporal_outbox(text,text,jsonb) owner to postgres;
 
+create or replace function api._is_interval_only(s jsonb) returns boolean
+language sql immutable as $$
+  select s is not null
+     and coalesce(jsonb_array_length(s->'intervals'),0)>0
+     and coalesce(jsonb_array_length(s->'cron_expressions'),0)=0
+     and coalesce(jsonb_array_length(s->'calendars'),0)=0;
+$$;
+
 create or replace function api.tg_tasks_temporal_complete() returns trigger language plpgsql as $$
+declare ev int;
 begin
   if (not old.done) and new.done and new.schedule is not null then
     new.done:=false;
     new.last_completed_at:=now();
-    perform api._temporal_outbox('sync','taskroll-'||new.id,new.schedule);
+
+    if api._is_interval_only(new.schedule) then
+      ev:=coalesce((new.schedule#>>'{intervals,0,every_seconds}')::int,0);
+      new.due_date:=coalesce(old.due_date,now()) + (greatest(ev,1)*interval '1 second');
+      new.due_pending:=false;
+    else
+      new.due_pending:=true;
+      new.due_date:=null;
+      new.schedule:=jsonb_set(new.schedule,'{start_at}',to_jsonb(coalesce(old.due_date,now())),true);
+    end if;
   end if;
   return new;
 end $$;
+
 drop trigger if exists t_tasks_temporal_complete on api.tasks;
 create trigger t_tasks_temporal_complete before update on api.tasks
 for each row execute function api.tg_tasks_temporal_complete();
@@ -330,16 +349,27 @@ begin
     perform api._temporal_outbox('delete','taskroll-'||old.id,null);
     return old;
   end if;
+
   if tg_op='INSERT' then
-    if new.schedule is not null then perform api._temporal_outbox('sync','taskroll-'||new.id,new.schedule); end if;
+    if new.schedule is not null and not api._is_interval_only(new.schedule) then
+      perform api._temporal_outbox('sync','taskroll-'||new.id,new.schedule);
+    else
+      perform api._temporal_outbox('delete','taskroll-'||new.id,null);
+    end if;
     return new;
   end if;
+
   if new.schedule is distinct from old.schedule then
-    if new.schedule is null then perform api._temporal_outbox('delete','taskroll-'||new.id,null);
-    else perform api._temporal_outbox('sync','taskroll-'||new.id,new.schedule); end if;
+    if new.schedule is null or api._is_interval_only(new.schedule) then
+      perform api._temporal_outbox('delete','taskroll-'||new.id,null);
+    else
+      perform api._temporal_outbox('sync','taskroll-'||new.id,new.schedule);
+    end if;
   end if;
+
   return new;
 end $$;
+
 drop trigger if exists t_tasks_temporal on api.tasks;
 create trigger t_tasks_temporal after insert or update or delete on api.tasks
 for each row execute function api.tg_tasks_temporal();
@@ -378,7 +408,7 @@ begin
   elsif new.kind='set_task_due' then
     tid:=(new.payload->>'task_id')::bigint;
     dd:=(new.payload->>'due_date')::timestamptz;
-    if tid is not null then update api.tasks set due_date=dd where id=tid; end if;
+    if tid is not null then update api.tasks set due_date=dd,due_pending=false where id=tid; end if;
   elsif new.kind='gc_exhausted' then
     rid:=(new.payload->>'reminder_id')::bigint;
     if rid is not null then delete from api.reminders where id=rid; end if;
