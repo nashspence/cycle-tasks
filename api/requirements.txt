@@ -1,3 +1,2 @@
 temporalio==1.21.1
 asyncpg==0.31.0
-temporal-schedule-input @ git+https://github.com/nashspence/temporal-schedule-input.git

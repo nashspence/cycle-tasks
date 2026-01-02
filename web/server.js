@@ -1,12 +1,31 @@
 import http from "node:http";
-import { URL } from "node:url";
+import { createReadStream } from "node:fs";
+import path from "node:path";
+import { URL, fileURLToPath } from "node:url";
 import parseInterval from "postgres-interval";
 
 const PORT = +process.env.PORT || 8080;
 const API = (process.env.API_UPSTREAM || "http://api:80").replace(/\/$/, "");
 const MAXPOS = 2147483647;
 const DEF_COLS = ["done", "title", "due", "tags"];
-const SCHED_SRC = "https://cdn.jsdelivr.net/gh/nashspence/temporal-schedule-input/web/temporal-schedule-input.js";
+
+// Serve the schedule-input module locally (file sits next to this server.js)
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SCHED_SRC = "/temporal-schedule-input.js";
+const SCHED_FILE = path.join(HERE, "temporal-schedule-input.js");
+
+const serveSched = (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/javascript; charset=utf-8",
+    "Cache-Control": "public, max-age=86400",
+  });
+  createReadStream(SCHED_FILE)
+    .on("error", () => {
+      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("missing temporal-schedule-input.js");
+    })
+    .pipe(res);
+};
 
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({
@@ -583,26 +602,26 @@ async function act(req, res) {
       }),
     });
 
-      if (a === "save") {
-        const title = String(b.title || "").trim();
-        if (!title) throw new Error("Title required");
+    if (a === "save") {
+      const title = String(b.title || "").trim();
+      if (!title) throw new Error("Title required");
 
-        const alertUrl = String(b.alert_url || "").trim();
-        const dueISO = toUtcISO(b.due);
-        const schedOn = (b.sched_on === "1" || b.sched_on === "on");
-        const opt = String(b.sopt || "schedule").toLowerCase();
-        const schedule = schedOn ? (opt === "interval" ? intervalSpec(b.interval) : specFromField(b.schedule)) : null;
-        if (schedOn && !schedule) throw new Error("Schedule required");
+      const alertUrl = String(b.alert_url || "").trim();
+      const dueISO = toUtcISO(b.due);
+      const schedOn = (b.sched_on === "1" || b.sched_on === "on");
+      const opt = String(b.sopt || "schedule").toLowerCase();
+      const schedule = schedOn ? (opt === "interval" ? intervalSpec(b.interval) : specFromField(b.schedule)) : null;
+      if (schedOn && !schedule) throw new Error("Schedule required");
 
-        const send = {
-          title,
-          description: String(b.description || ""),
-          tags: tagsFrom(b.tags),
-          due_date: dueISO,
-          alert_url: alertUrl || null,
-          schedule,
-          due_pending: schedOn && schedule && !dueISO ? true : false,
-        };
+      const send = {
+        title,
+        description: String(b.description || ""),
+        tags: tagsFrom(b.tags),
+        due_date: dueISO,
+        alert_url: alertUrl || null,
+        schedule,
+        due_pending: schedOn && schedule && !dueISO ? true : false,
+      };
 
       if (b.mode === "new") {
         const created = await api("/rpc/append_task", {
@@ -688,6 +707,12 @@ async function act(req, res) {
 }
 
 http.createServer((req, res) => {
+  const u = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+
+  if (req.method === "GET" && u.pathname === "/temporal-schedule-input.js") {
+    return serveSched(req, res);
+  }
+
   if (req.method === "GET") return render(req, res);
   if (req.method === "POST" && req.url === "/a") return act(req, res);
   res.writeHead(404); res.end("not found");
